@@ -1,0 +1,16 @@
+# Expo
+.expo/
+dist/
+web-build/
+
+# Dependencies
+node_modules/
+
+# Local dev
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Ignore the nested project
+/budgetwise/
