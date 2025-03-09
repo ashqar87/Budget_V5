@@ -1,168 +1,113 @@
 import React from 'react';
-import { View, StyleSheet, FlatList } from 'react-native';
-import { Text, Button, Card, useTheme, Divider } from 'react-native-paper';
+import { View, StyleSheet, FlatList, Dimensions } from 'react-native';
+import { List, Text, Divider, useTheme } from 'react-native-paper';
 import { format } from 'date-fns';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
-import EmptyState from '../common/EmptyState';
 
-const TransactionItem = ({ transaction, onPress }) => {
-  const theme = useTheme();
-  
-  // Format date
-  const formattedDate = format(new Date(transaction.date), 'MMM d, yyyy');
-  
-  // Determine icon and color based on transaction type
-  let iconName = 'cash';
-  let amountColor = theme.colors.text;
-  let amountPrefix = '';
-  
-  if (transaction.type === 'income') {
-    iconName = 'arrow-down';
-    amountColor = theme.colors.success;
-    amountPrefix = '+';
-  } else if (transaction.type === 'expense') {
-    iconName = 'arrow-up';
-    amountColor = theme.colors.error;
-    amountPrefix = '-';
-  } else if (transaction.type === 'transfer') {
-    iconName = 'bank-transfer';
-    amountColor = theme.colors.primary;
-  }
-  
-  return (
-    <Card style={styles.transactionCard} onPress={onPress}>
-      <Card.Content style={styles.transactionContent}>
-        <MaterialCommunityIcons
-          name={iconName}
-          size={24}
-          color={amountColor}
-          style={styles.icon}
-        />
-        
-        <View style={styles.detailsContainer}>
-          <Text style={styles.payee}>{transaction.payee}</Text>
-          
-          {transaction.notes ? (
-            <Text style={styles.notes} numberOfLines={1}>
-              {transaction.notes}
-            </Text>
-          ) : null}
-          
-          <Text style={styles.date}>{formattedDate}</Text>
-        </View>
-        
-        <Text style={[styles.amount, { color: amountColor }]}>
-          {amountPrefix}${Math.abs(transaction.amount).toFixed(2)}
-        </Text>
-      </Card.Content>
-    </Card>
-  );
-};
+const { width, height } = Dimensions.get('window');
 
-const TransactionsList = ({ 
-  transactions, 
-  limit,
-  showViewAll = false,
-  onViewAll,
-  emptyMessage = "No transactions found",
-  onTransactionPress
-}) => {
-  const navigation = useNavigation();
+const TransactionsList = ({ transactions, onTransactionPress }) => {
   const theme = useTheme();
-  
-  // Limit transactions if specified
-  const displayTransactions = limit
-    ? transactions.slice(0, limit)
-    : transactions;
-    
-  if (transactions.length === 0) {
+
+  if (!transactions || transactions.length === 0) {
     return (
-      <EmptyState 
-        icon="receipt-outline" 
-        title="No Transactions" 
-        message={emptyMessage}
-      />
+      <View style={styles.emptyContainer}>
+        <Text style={styles.emptyText}>No transactions found</Text>
+      </View>
     );
   }
-  
+
+  const renderTransactionItem = ({ item }) => {
+    const isExpense = item.type === 'expense';
+    const isTransfer = item.type === 'transfer';
+    const amountColor = isExpense ? theme.colors.error : theme.colors.success;
+    const amountPrefix = isExpense ? '-' : '+';
+    const categoryColor = item.category?.color || '#757575';
+    
+    return (
+      <>
+        <List.Item
+          title={item.payee}
+          description={`${item.category?.name || 'Uncategorized'} ${item.notes ? `• ${item.notes}` : ''}`}
+          left={props => (
+            <View {...props} style={styles.iconContainer}>
+              <View style={[styles.categoryIcon, { backgroundColor: categoryColor }]}>
+                <Text style={styles.iconText}>
+                  {item.category?.icon?.charAt(0).toUpperCase() || (isTransfer ? 'T' : '?')}
+                </Text>
+              </View>
+            </View>
+          )}
+          right={props => (
+            <View {...props} style={styles.rightContent}>
+              <Text style={[styles.amount, { color: amountColor }]}>
+                {amountPrefix}${Math.abs(item.amount).toFixed(2)}
+              </Text>
+              <Text style={styles.date}>
+                {format(typeof item.date === 'number' ? new Date(item.date) : new Date(), 'MMM d')}
+              </Text>
+            </View>
+          )}
+          onPress={() => onTransactionPress?.(item)}
+          style={styles.listItem}
+        />
+        <Divider />
+      </>
+    );
+  };
+
   return (
-    <View style={styles.container}>
-      <FlatList
-        data={displayTransactions}
-        keyExtractor={item => item.id}
-        renderItem={({ item }) => (
-          <TransactionItem 
-            transaction={item} 
-            onPress={() => onTransactionPress && onTransactionPress(item)}
-          />
-        )}
-        ItemSeparatorComponent={() => <View style={styles.separator} />}
-        scrollEnabled={false}
-      />
-      
-      {showViewAll && limit && transactions.length > limit && (
-        <Button 
-          mode="text" 
-          onPress={onViewAll}
-          style={styles.viewAllButton}
-        >
-          View All ({transactions.length})
-        </Button>
-      )}
-    </View>
+    <FlatList
+      data={transactions}
+      renderItem={renderTransactionItem}
+      keyExtractor={item => `transaction-${item.id}`} // Add prefix to ensure uniqueness
+      style={styles.list}
+    />
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    marginTop: 8,
-  },
-  transactionCard: {
-    marginVertical: 4,
-    elevation: 1,
-  },
-  transactionContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  icon: {
-    marginRight: 12,
-  },
-  detailsContainer: {
+  list: {
     flex: 1,
   },
-  payee: {
-    fontSize: 16,
-    fontWeight: '500',
+  listItem: {
+    paddingVertical: 8,
+    paddingHorizontal: width < 350 ? 8 : 16, // Less padding on small screens
   },
-  notes: {
-    fontSize: 12,
-    color: '#757575',
-    marginTop: 2,
+  iconContainer: {
+    justifyContent: 'center',
+  },
+  categoryIcon: {
+    width: width < 350 ? 32 : 40, // Smaller icon on small screens
+    height: width < 350 ? 32 : 40,
+    borderRadius: width < 350 ? 16 : 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  iconText: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
+  rightContent: {
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+  },
+  amount: {
+    fontWeight: 'bold',
+    fontSize: width < 350 ? 14 : 16, // Smaller font on small screens
   },
   date: {
     fontSize: 12,
     color: '#757575',
-    marginTop: 4,
-  },
-  amount: {
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  separator: {
-    height: 8,
   },
   emptyContainer: {
-    padding: 32,
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
+    padding: 20,
   },
   emptyText: {
-    color: '#757575',
     fontSize: 16,
-  },
-  viewAllButton: {
-    marginTop: 16,
+    color: '#757575',
   },
 });
 

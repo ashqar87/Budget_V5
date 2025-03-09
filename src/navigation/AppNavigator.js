@@ -1,9 +1,11 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { useSelector } from 'react-redux';
+import { useSelector, useDispatch } from 'react-redux';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useTheme } from 'react-native-paper';
+import { useNavigation } from '@react-navigation/native';
+import { Platform } from 'react-native';
 
 // Auth Screens
 import LoginScreen from '../screens/auth/LoginScreen';
@@ -20,6 +22,9 @@ import AccountDetailsScreen from '../screens/accounts/AccountDetailsScreen';
 import AddAccountScreen from '../screens/accounts/AddAccountScreen';
 import CategoryDetailsScreen from '../screens/budget/CategoryDetailsScreen';
 import AddTransactionScreen from '../screens/transactions/AddTransactionScreen';
+
+// Import the update function
+import { syncReadyToAssignWithBudgets } from '../utils/budgetUtils';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -47,6 +52,19 @@ const AccountStack = () => {
 };
 
 const BudgetStack = () => {
+  const navigation = useNavigation();
+  const dispatch = useDispatch();
+  
+  // Add a focus listener to recalculate readyToAssign when tab is focused
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      // Sync readyToAssign with the current state of budgets
+      syncReadyToAssignWithBudgets(dispatch);
+    });
+    
+    return unsubscribe;
+  }, [navigation, dispatch]);
+  
   return (
     <Stack.Navigator>
       <Stack.Screen 
@@ -97,11 +115,23 @@ const MainTabNavigator = () => {
   
   return (
     <Tab.Navigator
-      screenOptions={{
+      screenOptions={({ route }) => ({
         tabBarActiveTintColor: theme.colors.primary,
         tabBarInactiveTintColor: theme.colors.disabled,
         headerShown: false,
-      }}
+        tabBarStyle: (route.params?.tabBarStyle) || {
+          height: Platform.OS === 'ios' ? 88 : 60, // Higher height for iOS (includes safe area)
+          paddingTop: Platform.OS === 'ios' ? 8 : 0,
+          paddingBottom: Platform.OS === 'ios' ? 28 : 8,
+        },
+        tabBarLabelStyle: {
+          fontSize: 12,
+          marginBottom: Platform.OS === 'android' ? 4 : 0,
+        },
+        tabBarIconStyle: {
+          marginTop: Platform.OS === 'android' ? 4 : 0,
+        },
+      })}
     >
       <Tab.Screen 
         name="Budget" 

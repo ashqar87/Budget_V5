@@ -5,7 +5,7 @@ import { useRoute, useNavigation } from '@react-navigation/native';
 import { useDispatch } from 'react-redux';
 import { format } from 'date-fns';
 import { useDatabase } from '../../context/DatabaseContext';
-import { Q } from '@nozbe/watermelondb';
+import { Q } from '../../db/query'; // Import our Q mock implementation
 import { updateAccountSuccess, deleteAccountSuccess } from '../../store/slices/accountsSlice';
 import TransactionsList from '../../components/transactions/TransactionsList';
 
@@ -34,6 +34,10 @@ const AccountDetailsScreen = () => {
         const accountsCollection = database.collections.get('accounts');
         const accountRecord = await accountsCollection.find(accountId);
         
+        if (!accountRecord) {
+          throw new Error(`Account with ID ${accountId} not found`);
+        }
+        
         setAccount({
           id: accountRecord.id,
           name: accountRecord.name,
@@ -51,36 +55,28 @@ const AccountDetailsScreen = () => {
         const recentTransactions = await transactionsCollection
           .query(
             Q.where('account_id', accountId),
-            Q.sortBy('date', Q.desc),
+            Q.sortBy('date', Q.desc()),
             Q.take(10)
           )
           .fetch();
         
-        // Format transactions for display
-        const formattedTransactions = await Promise.all(
-          recentTransactions.map(async transaction => {
-            let categoryName = 'Uncategorized';
-            if (transaction.category.id) {
-              const category = await transaction.category.fetch();
-              categoryName = category ? category.name : 'Uncategorized';
-            }
-            
-            return {
-              id: transaction.id,
-              amount: transaction.amount,
-              payee: transaction.payee,
-              notes: transaction.notes,
-              date: transaction.date,
-              type: transaction.type,
-              categoryName,
-            };
-          })
-        );
+        // Fetch category information for each transaction
+        const categoriesCollection = database.collections.get('categories');
+        const categories = await categoriesCollection.query().fetch();
         
-        setTransactions(formattedTransactions);
+        // Attach category information to transactions
+        const transactionsWithCategories = recentTransactions.map(transaction => {
+          const category = categories.find(cat => cat.id === transaction.category_id);
+          return {
+            ...transaction,
+            category: category || null
+          };
+        });
+        
+        setTransactions(transactionsWithCategories);
       } catch (error) {
-        console.error('Error loading account details:', error);
-        Alert.alert('Error', 'Failed to load account details');
+        console.error('Error loading account data:', error);
+        setError(error.message);
       } finally {
         setIsLoading(false);
       }
@@ -120,7 +116,7 @@ const AccountDetailsScreen = () => {
         // Calculate balance difference
         const balanceDifference = newBalance - accountRecord.currentBalance;
         
-        // Update account name and balance
+        // Update account name and balance first
         await accountRecord.update(account => {
           account.name = editedName.trim();
           account.currentBalance = newBalance;
@@ -134,22 +130,21 @@ const AccountDetailsScreen = () => {
             transaction.payee = 'Balance Adjustment';
             transaction.notes = 'Manual balance adjustment';
             transaction.type = balanceDifference > 0 ? 'income' : 'expense';
-            transaction.account.set(accountRecord);
-            transaction.date = new Date();
+            transaction.account_id = accountId; // Direct ID assignment
+            transaction.date = new Date().getTime(); // Store as timestamp
             transaction.createdAt = new Date();
             transaction.updatedAt = new Date();
           });
         }
         
-        // Update Redux store
+        // Update Redux store with all new account properties
         dispatch(updateAccountSuccess({
           id: accountRecord.id,
-          name: accountRecord.name,
-          currentBalance: accountRecord.currentBalance,
-          initialBalance: accountRecord.initialBalance,
-          accountType: accountRecord.accountType,
-          createdAt: accountRecord.createdAt,
-          updatedAt: accountRecord.updatedAt,
+          changes: {
+            name: editedName.trim(),
+            currentBalance: newBalance,
+            updatedAt: new Date()
+          }
         }));
         
         // Update local state
@@ -187,8 +182,7 @@ const AccountDetailsScreen = () => {
         
         // Delete account if no transactions
         const accountsCollection = database.collections.get('accounts');
-        const accountRecord = await accountsCollection.find(accountId);
-        await accountRecord.markAsDeleted();
+        await accountsCollection.delete(accountId); // Use delete instead of markAsDeleted
         dispatch(deleteAccountSuccess(accountId));
         
         // Navigate back to accounts list

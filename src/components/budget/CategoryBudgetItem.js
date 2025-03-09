@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, TouchableOpacity } from 'react-native';
 import { Surface, Text, IconButton, TextInput, Button } from 'react-native-paper';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -7,23 +7,24 @@ const CategoryBudgetItem = ({ category, assigned, available, onAssign, onPress }
   const [isEditing, setIsEditing] = useState(false);
   const [assignedAmount, setAssignedAmount] = useState(assigned.toString());
   
-  const handleSave = () => {
-    const amount = parseFloat(assignedAmount);
-    if (!isNaN(amount)) {
-      onAssign(amount);
-    } else {
-      // Reset to previous value if invalid input
-      setAssignedAmount(assigned.toString());
-    }
-    setIsEditing(false);
-  };
-  
+  useEffect(() => {
+    // Update assignedAmount when assigned prop changes
+    setAssignedAmount(assigned.toString());
+  }, [assigned]);
+
   const handleCancel = () => {
     setAssignedAmount(assigned.toString());
     setIsEditing(false);
   };
-  
-  // Get color for available amount (red if negative)
+
+  const handleSave = () => {
+    const amount = parseFloat(assignedAmount);
+    if (!isNaN(amount)) {
+      onAssign(category.id, amount);
+    }
+    setIsEditing(false);
+  };
+
   const getAvailableColor = () => {
     return available < 0 ? '#D32F2F' : available > 0 ? '#2E7D32' : '#757575';
   };

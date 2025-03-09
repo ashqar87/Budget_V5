@@ -4,11 +4,16 @@ import {
   StyleSheet, 
   ScrollView,
   KeyboardAvoidingView, 
-  Platform 
+  Platform,
+  Dimensions
 } from 'react-native';
 import { TextInput, Button, Text, Title, Surface } from 'react-native-paper';
 import { useDispatch, useSelector } from 'react-redux';
 import { loginSuccess } from '../../store/slices/authSlice';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+// Get device dimensions
+const { width, height } = Dimensions.get('window');
 
 const RegisterScreen = ({ navigation }) => {
   const [name, setName] = useState('');
@@ -52,9 +57,12 @@ const RegisterScreen = ({ navigation }) => {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <View style={styles.background}>
-        <ScrollView contentContainerStyle={styles.scrollContainer}>
+        <ScrollView 
+          contentContainerStyle={styles.scrollContainer}
+          keyboardShouldPersistTaps="handled"
+        >
           <KeyboardAvoidingView
             behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             style={styles.keyboardAvoid}
@@ -121,7 +129,7 @@ const RegisterScreen = ({ navigation }) => {
           </KeyboardAvoidingView>
         </ScrollView>
       </View>
-    </View>
+    </SafeAreaView>
   );
 };
 
@@ -136,16 +144,19 @@ const styles = StyleSheet.create({
   scrollContainer: {
     flexGrow: 1,
     justifyContent: 'center',
-    padding: 20,
+    padding: width > 500 ? 40 : 20, // More padding on larger screens
   },
   keyboardAvoid: {
     flex: 1,
   },
   formContainer: {
-    padding: 20,
+    padding: Math.min(width * 0.05, 20), // Responsive padding
     borderRadius: 10,
     elevation: 4,
     backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    maxWidth: 500, // Add max width
+    alignSelf: 'center', // Center on larger screens
+    width: '100%',
   },
   title: {
     fontSize: 28,

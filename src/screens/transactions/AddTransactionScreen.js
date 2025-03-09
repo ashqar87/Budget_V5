@@ -9,6 +9,7 @@ import { updateBudgetAvailableSuccess } from '../../store/slices/budgetSlice';
 import { useDatabase } from '../../context/DatabaseContext';
 import { format } from 'date-fns';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { Q } from '../../db/query'; // Add this import
 
 const AddTransactionScreen = () => {
   const route = useRoute();
@@ -126,8 +127,26 @@ const AddTransactionScreen = () => {
         // Get current month for budget updates
         const currentMonth = format(new Date(), 'yyyy-MM');
         
-        // Get account record
+        // First, get the source account
         const accountRecord = await accountsCollection.find(selectedAccount.id);
+        if (!accountRecord) {
+          throw new Error('Source account not found');
+        }
+        
+        // Calculate new balances
+        let newSourceBalance = accountRecord.currentBalance;
+        
+        if (transactionType === 'expense') {
+          newSourceBalance -= parsedAmount;
+        } else if (transactionType === 'income') {
+          newSourceBalance += parsedAmount;
+        } else if (transactionType === 'transfer') {
+          newSourceBalance -= parsedAmount;
+        }
+        
+        // Store transaction time
+        const transactionTime = date.getTime();
+        const now = new Date();
         
         // Create transaction
         const transaction = await transactionsCollection.create(tx => {
@@ -135,117 +154,135 @@ const AddTransactionScreen = () => {
           tx.payee = payee.trim();
           tx.notes = notes.trim();
           tx.type = transactionType;
-          tx.account.set(accountRecord);
-          tx.date = date;
-          tx.createdAt = new Date();
-          tx.updatedAt = new Date();
+          tx.account_id = selectedAccount.id;
+          tx.date = transactionTime; // Store as timestamp
+          tx.createdAt = now;
+          tx.updatedAt = now;
           
-          // Set category if expense
-          if (transactionType === 'expense' && selectedCategory) {
-            tx.category.id = selectedCategory.id;
-          }
+          // Only set category for expense transactions
+          tx.category_id = transactionType === 'expense' && selectedCategory ? selectedCategory.id : null;
           
-          // Set transfer account if transfer
-          if (transactionType === 'transfer' && selectedTransferAccount) {
-            tx.transferAccount.id = selectedTransferAccount.id;
-          }
+          // Only set transfer account for transfer transactions  
+          tx.transfer_account_id = transactionType === 'transfer' && selectedTransferAccount 
+            ? selectedTransferAccount.id 
+            : null;
         });
         
-        // Update account balance
-        let newBalance = accountRecord.currentBalance;
+        // Update source account
+        await accountsCollection.update(accountRecord.id, account => {
+          account.currentBalance = newSourceBalance;
+          account.updatedAt = now;
+        });
         
-        if (transactionType === 'expense') {
-          newBalance -= parsedAmount;
-        } else if (transactionType === 'income') {
-          newBalance += parsedAmount;
-        } else if (transactionType === 'transfer') {
-          newBalance -= parsedAmount;
-          
-          // Update transfer account balance
+        // First dispatch account update to prevent race conditions
+        dispatch(updateAccountSuccess({
+          id: selectedAccount.id,
+          changes: {
+            currentBalance: newSourceBalance,
+            updatedAt: now.toISOString(),
+            isTransfer: transactionType === 'transfer'
+          }
+        }));
+        
+        // Handle transfer to destination account if applicable
+        if (transactionType === 'transfer' && selectedTransferAccount) {
           const transferAccount = await accountsCollection.find(selectedTransferAccount.id);
-          await transferAccount.update(acc => {
-            acc.currentBalance = acc.currentBalance + parsedAmount;
-            acc.updatedAt = new Date();
-          });
-          
-          // Dispatch update for transfer account
-          dispatch(updateAccountSuccess({
-            id: transferAccount.id,
-            currentBalance: transferAccount.currentBalance,
-            name: transferAccount.name,
-            initialBalance: transferAccount.initialBalance,
-            accountType: transferAccount.accountType,
-          }));
-        }
-        
-        // Update account
-        await accountRecord.update(acc => {
-          acc.currentBalance = newBalance;
-          acc.updatedAt = new Date();
-        });
-        
-        // Update budget available amount if expense
-        if (transactionType === 'expense' && selectedCategory) {
-          // Find budget for this category and month
-          const budgets = await budgetsCollection
-            .query(
-              Q.where('category_id', selectedCategory.id),
-              Q.where('month', currentMonth)
-            )
-            .fetch();
-          
-          if (budgets.length > 0) {
-            const budget = budgets[0];
-            await budget.update(b => {
-              b.available = b.available - parsedAmount;
-              b.updatedAt = new Date();
+          if (transferAccount) {
+            const transferNewBalance = transferAccount.currentBalance + parsedAmount;
+            
+            await accountsCollection.update(transferAccount.id, account => {
+              account.currentBalance = transferNewBalance;
+              account.updatedAt = now;
             });
             
-            // Dispatch budget update
-            dispatch(updateBudgetAvailableSuccess({
-              categoryId: selectedCategory.id,
-              availableDifference: -parsedAmount
+            dispatch(updateAccountSuccess({
+              id: transferAccount.id,
+              changes: {
+                currentBalance: transferNewBalance,
+                updatedAt: now.toISOString(),
+                isTransfer: true // Mark as transfer to prevent affecting readyToAssign
+              }
             }));
           }
         }
         
-        // Dispatch account update
-        dispatch(updateAccountSuccess({
-          id: accountRecord.id,
-          currentBalance: accountRecord.currentBalance,
-          name: accountRecord.name,
-          initialBalance: accountRecord.initialBalance,
-          accountType: accountRecord.accountType,
-        }));
+        // Update budget if expense
+        if (transactionType === 'expense' && selectedCategory) {
+          try {
+            // Get current month in YYYY-MM format
+            const currentMonth = format(date, 'yyyy-MM');
+            
+            // Get or create budget for this category and month (handles rollover automatically)
+            const budget = await getOrCreateCategoryBudget(selectedCategory.id, currentMonth, dispatch);
+            
+            if (budget) {
+              console.log(`Updating budget for ${selectedCategory.id} in ${currentMonth}: reducing available by ${parsedAmount}`);
+              
+              // Reduce the available amount by the transaction amount
+              const newAvailable = budget.available - parsedAmount;
+              
+              const budgetsCollection = database.collections.get('category_budgets');
+              await budgetsCollection.update(budget.id, b => {
+                b.available = newAvailable;
+                b.updatedAt = now;
+              });
+              
+              // Update Redux immediately for real-time UI updates
+              dispatch(updateBudgetSuccess({
+                id: budget.id,
+                changes: {
+                  available: newAvailable,
+                  updatedAt: now.toISOString()
+                }
+              }));
+              
+              console.log(`Budget updated successfully: new available = ${newAvailable}`);
+            } else {
+              console.error(`Failed to get/create budget for category ${selectedCategory.id} in ${currentMonth}`);
+            }
+          } catch (budgetError) {
+            console.error('Error updating category budget:', budgetError);
+            // Continue with transaction creation even if budget update fails
+          }
+        }
         
-        // Dispatch transaction update
+        // Dispatch transaction creation (convert dates to ISO strings for Redux)
         dispatch(addTransactionSuccess({
           id: transaction.id,
-          amount: transaction.amount,
+          amount: parsedAmount,
           payee: transaction.payee,
           notes: transaction.notes,
-          date: transaction.date,
-          type: transaction.type,
+          date: transactionTime,
+          type: transactionType,
+          account_id: selectedAccount.id,
+          category_id: transactionType === 'expense' && selectedCategory ? selectedCategory.id : null,
+          transfer_account_id: transactionType === 'transfer' && selectedTransferAccount ? selectedTransferAccount.id : null,
+          createdAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+          // Include complete objects for UI display
           account: {
-            id: accountRecord.id,
-            name: accountRecord.name
+            id: selectedAccount.id,
+            name: selectedAccount.name
           },
-          category: selectedCategory ? {
+          // Make sure category data is included properly for display
+          category: selectedCategory && transactionType === 'expense' ? {
             id: selectedCategory.id,
-            name: selectedCategory.name
+            name: selectedCategory.name,
+            color: selectedCategory.color || '#757575',
+            icon: selectedCategory.icon || 'folder'
           } : null,
-          transferAccount: selectedTransferAccount ? {
+          transferAccount: selectedTransferAccount && transactionType === 'transfer' ? {
             id: selectedTransferAccount.id,
             name: selectedTransferAccount.name
           } : null,
         }));
+        
+        // Navigate back after ALL updates are complete
+        setTimeout(() => navigation.goBack(), 100);
       });
-      
-      // Navigate back
-      navigation.goBack();
     } catch (error) {
       console.error('Error creating transaction:', error);
-      Alert.alert('Error', 'Failed to create transaction. Please try again.');
+      Alert.alert('Error', 'Failed to create transaction: ' + error.message);
     }
   };
 

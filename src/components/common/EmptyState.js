@@ -36,25 +36,25 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 32,
+    padding: 20,
   },
   icon: {
-    marginBottom: 16,
+    marginBottom: 20,
   },
   title: {
-    fontSize: 24,
+    fontSize: 20,
     fontWeight: 'bold',
-    marginBottom: 8,
+    marginBottom: 10,
     textAlign: 'center',
   },
   message: {
     fontSize: 16,
     color: '#757575',
     textAlign: 'center',
-    marginBottom: 24,
+    marginBottom: 20,
   },
   button: {
-    marginTop: 8,
+    marginTop: 10,
   },
 });
 

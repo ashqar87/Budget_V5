@@ -1,7 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { synchronize } from '@nozbe/watermelondb/sync';
-
-// Import database from setup.js
+import React, { createContext, useContext, useEffect, useState } from 'react';
 import { database, setupDatabase } from '../db/setup';
 
 // Create context
@@ -12,21 +9,17 @@ export const DatabaseProvider = ({ children }) => {
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    const setupInitialData = async () => {
+    const initializeDatabase = async () => {
       try {
-        // Use setupDatabase from setup.js instead of duplicating the logic
-        const success = await setupDatabase();
-        if (!success) {
-          console.warn('Database setup might have had issues');
-        }
+        await setupDatabase();
         setIsReady(true);
       } catch (error) {
-        console.error('Error setting up initial data:', error);
-        setIsReady(true); // Continue anyway
+        console.error('Failed to initialize database:', error);
+        setIsReady(true); // Continue anyway to allow app to function
       }
     };
-    
-    setupInitialData();
+
+    initializeDatabase();
   }, []);
 
   if (!isReady) {

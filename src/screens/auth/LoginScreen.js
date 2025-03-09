@@ -4,11 +4,16 @@ import {
   StyleSheet, 
   TouchableOpacity, 
   KeyboardAvoidingView, 
-  Platform
+  Platform,
+  Dimensions
 } from 'react-native';
 import { TextInput, Button, Text, Title, Surface } from 'react-native-paper';
 import { useDispatch, useSelector } from 'react-redux';
 import { loginStart, loginSuccess, loginFailure } from '../../store/slices/authSlice';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+// Get device dimensions
+const { width, height } = Dimensions.get('window');
 
 const LoginScreen = ({ navigation }) => {
   const [email, setEmail] = useState('');
@@ -42,11 +47,12 @@ const LoginScreen = ({ navigation }) => {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <View style={styles.background}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.keyboardAvoid}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
         >
           <Surface style={styles.formContainer}>
             <Title style={styles.title}>Budget Wise</Title>
@@ -98,7 +104,7 @@ const LoginScreen = ({ navigation }) => {
           </Surface>
         </KeyboardAvoidingView>
       </View>
-    </View>
+    </SafeAreaView>
   );
 };
 
@@ -116,15 +122,16 @@ const styles = StyleSheet.create({
     flex: 1,
     width: '90%',
     justifyContent: 'center',
+    maxWidth: 500, // Add max width for tablets/larger phones
   },
   formContainer: {
-    padding: 20,
+    padding: Math.min(width * 0.05, 20), // Responsive padding
     borderRadius: 10,
     elevation: 4,
     backgroundColor: 'rgba(255, 255, 255, 0.95)',
   },
   title: {
-    fontSize: 28,
+    fontSize: Math.min(width * 0.07, 28), // Responsive font size
     fontWeight: 'bold',
     marginBottom: 20,
     textAlign: 'center',
