@@ -18,9 +18,13 @@ import {
   getOrCreateBudget,
   assignToBudget,
   ensureAllCategoryBudgets,
+  ensureCategoryBudgets, 
   calculateReadyToAssign,
   getBudgetsForMonth,
-  debugBudgets
+  debugBudgets,
+  isMonthAccessible,
+  getAccessibleMonths,
+  repairBudgetChain // Add this import
 } from '../../utils/budgetUtils';
 import BudgetAllocationModal from '../../components/budget/BudgetAllocationModal';
 import { useFocusEffect } from '@react-navigation/native';
@@ -50,6 +54,8 @@ const BudgetScreen = ({ navigation }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [monthMenuVisible, setMonthMenuVisible] = useState(false);
   const [performingRollover, setPerformingRollover] = useState(false);
+  // Add missing lastRefreshTime state variable
+  const [lastRefreshTime, setLastRefreshTime] = useState(0);
   
   // Category editing state
   const [editDialogVisible, setEditDialogVisible] = useState(false);
@@ -124,7 +130,6 @@ const BudgetScreen = ({ navigation }) => {
   useEffect(() => {
     const loadData = async () => {
       setIsLoading(true);
-      setPerformingRollover(true);
       
       try {
         // Load categories first for faster UI rendering
@@ -134,6 +139,19 @@ const BudgetScreen = ({ navigation }) => {
         dispatch(fetchCategoriesSuccess(categoriesData));
         
         console.log(`Loaded ${categoriesData.length} categories for ${currentMonth}`);
+        
+        // Repair budget chains from previous to current month + 1 to handle future months
+        const previousMonth = format(
+          subMonths(parseISO(`${currentMonth}-01`), 1),
+          'yyyy-MM'
+        );
+        const nextMonth = format(
+          addMonths(parseISO(`${currentMonth}-01`), 1),
+          'yyyy-MM'
+        );
+        
+        console.log(`Repairing budget chain from ${previousMonth} to ${nextMonth}`);
+        await repairBudgetChain(previousMonth, nextMonth);
         
         // Ensure all categories have budgets for this month
         await ensureAllCategoryBudgets(currentMonth);
@@ -169,39 +187,54 @@ const BudgetScreen = ({ navigation }) => {
     loadData();
   }, [currentMonth, dispatch]);
 
-  // Add useFocusEffect to ensure data reloads when navigating back to this screen
+  // Modify the useFocusEffect to prevent unnecessary recalculations
   useFocusEffect(
     React.useCallback(() => {
+      // Track if component is mounted to prevent state updates after unmount
+      let isMounted = true;
+      
       const loadData = async () => {
-        // Only reload data if not already loading
-        if (!isLoading) {
-          console.log('Screen focused, refreshing budget data');
-          setIsLoading(true);
+        // Skip reloading if the data is already in cache and not stale
+        const shouldRefresh = Date.now() - (lastRefreshTime || 0) > 10000; // Only refresh after 10 seconds
+        if (!shouldRefresh && budgets.length > 0) return;
+        
+        if (!isMounted) return;
+        setIsLoading(true);
+        
+        try {
+          // Instead of clearBudgetCache(), use the more efficient approach
+          // that preserves transaction impact data
+          await ensureAllCategoryBudgets(currentMonth);
           
-          try {
-            // Ensure all categories have budgets for current month
-            await ensureAllCategoryBudgets(currentMonth);
-            
-            // Reload budgets for the current month
-            const monthBudgets = await getBudgetsForMonth(currentMonth);
-            console.log(`Reloaded ${monthBudgets.length} budgets for ${currentMonth}`);
-            
-            // Update Redux store
+          // Reload budgets for the current month
+          const monthBudgets = await getBudgetsForMonth(currentMonth);
+          
+          if (isMounted) {
             dispatch(fetchBudgetsSuccess(monthBudgets));
             
             // Update ready to assign amount
             const readyToAssign = await calculateReadyToAssign(currentMonth);
             dispatch(updateReadyToAssign(readyToAssign));
-          } catch (error) {
-            console.error('Error reloading budget data:', error);
-          } finally {
+            setLastRefreshTime(Date.now());
+          }
+        } catch (error) {
+          console.error('Error reloading budget data:', error);
+        } finally {
+          if (isMounted) {
             setIsLoading(false);
           }
         }
       };
       
-      loadData();
-    }, [currentMonth, dispatch])
+      // Only load data if not already loading
+      if (!isLoading) {
+        loadData();
+      }
+      
+      return () => {
+        isMounted = false;
+      };
+    }, [currentMonth, dispatch, lastRefreshTime, budgets.length]) // Add lastRefreshTime to dependencies
   );
 
   const handleBudgetChange = (categoryId, value) => {
@@ -279,7 +312,7 @@ const BudgetScreen = ({ navigation }) => {
           updatedAt: updatedCategory.updatedAt
         }
       }));
-      
+       
       setEditDialogVisible(false);
       Alert.alert('Success', 'Category updated successfully');
     } catch (error) {
@@ -288,22 +321,39 @@ const BudgetScreen = ({ navigation }) => {
     }
   };
 
-  const handleMonthChange = (direction) => {
-    let newMonth;
-    const currentDate = parseISO(`${currentMonth}-01`);
+  const handleMonthChange = async (direction) => {
+    setIsLoading(true);
     
-    if (direction === 'prev') {
-      newMonth = format(subMonths(currentDate, 1), 'yyyy-MM');
-    } else if (direction === 'next') {
-      newMonth = format(addMonths(currentDate, 1), 'yyyy-MM');
-    }
-    
-    if (newMonth) {
-      // Clear any existing rollover state
-      setPerformingRollover(false);
+    try {
+      let newMonth;
+      const currentDate = parseISO(`${currentMonth}-01`);
       
-      // Navigate to the new month
-      dispatch(setCurrentMonth(newMonth));
+      if (direction === 'prev') {
+        newMonth = format(subMonths(currentDate, 1), 'yyyy-MM');
+      } else if (direction === 'next') {
+        newMonth = format(addMonths(currentDate, 1), 'yyyy-MM');
+      }
+      
+      if (newMonth) {
+        // Check if the month is accessible
+        const canAccess = await isMonthAccessible(newMonth);
+        if (!canAccess) {
+          Alert.alert(
+            'Month Not Accessible', 
+            'You can access up to one month ahead of your last budget assignments.'
+          );
+          setIsLoading(false);
+          return;
+        }
+        
+        // Navigate to the new month
+        dispatch(setCurrentMonth(newMonth));
+      }
+    } catch (error) {
+      console.error('Error changing month:', error);
+      Alert.alert('Error', 'Failed to change month');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -382,7 +432,7 @@ const BudgetScreen = ({ navigation }) => {
   // Handle saving allocation - fix to ensure proper error handling
   const handleSaveAllocation = async (amount) => {
     if (!selectedCategoryForAllocation) return false;
-    
+        
     const parsedAmount = parseFloat(amount);
     if (isNaN(parsedAmount) || parsedAmount < 0) {
       Alert.alert('Invalid Amount', 'Please enter a valid budget amount');
@@ -489,7 +539,7 @@ const BudgetScreen = ({ navigation }) => {
             Q.where('date', Q.gte(prevMonthStart.getTime())),
             Q.where('date', Q.lte(prevMonthEnd.getTime()))
           ).fetch();
-          
+           
           amountToAssign = transactions.reduce(
             (sum, tx) => sum + tx.amount, 
             0
@@ -514,7 +564,7 @@ const BudgetScreen = ({ navigation }) => {
               const month = `${date.getFullYear()}-${date.getMonth() + 1}`;
               monthsSet.add(month);
             });
-            
+                 
             const numMonths = Math.max(1, monthsSet.size);
             amountToAssign = total / numMonths;
           }
@@ -542,7 +592,7 @@ const BudgetScreen = ({ navigation }) => {
           },
         ]
       );
-      
+            
     } catch (error) {
       console.error('Error in auto-assign:', error);
       Alert.alert('Error', 'Failed to auto-assign budget amount');
@@ -692,7 +742,7 @@ const BudgetScreen = ({ navigation }) => {
       month: i
     };
   });
-  
+    
   // Handle selecting a month in the modal
   const handleSelectMonth = (selectedMonth) => {
     dispatch(setCurrentMonth(selectedMonth));
@@ -707,59 +757,74 @@ const BudgetScreen = ({ navigation }) => {
   const monthModalAnimVal = useRef(new Animated.Value(0)).current;
   
   // Function to show the month selection modal with improved responsiveness
-  const showMonthSelectionModal = () => {
-    setTimeout(() => {
-      if (monthButtonRef.current) {
-        monthButtonRef.current.measureInWindow((x, y, width, height) => {
-          // Get screen dimensions for responsive calculations
-          const screenWidth = Dimensions.get('window').width;
-          const screenHeight = Dimensions.get('window').height;
-          
-          // Make the modal width responsive to screen size
-          const modalWidth = Math.min(240, screenWidth * 0.65);
-          
-          // Calculate position that ensures the modal stays on screen
-          const buttonCenterX = x + (width / 2);
-          
-          // Ensure the modal doesn't go off the left or right edges
-          const modalLeft = Math.max(
-            16, // Minimum left margin
-            Math.min(
-              buttonCenterX - (modalWidth / 2), // Center under button
-              screenWidth - modalWidth - 16 // Maximum right position
-            )
-          );
-          
-          // Check if the modal would go off the bottom of the screen
-          const wouldOverflowBottom = (y + height + 260) > screenHeight; // 260 is approx modal height
-          
-          // Position modal above or below button depending on space
-          const modalTop = wouldOverflowBottom 
-            ? y - 260 - 8 // Position above with gap
-            : y + height - 1; // Position below with overlap for connected appearance
-          
-          setMonthModalPosition({
-            top: modalTop,
-            left: modalLeft,
-            width: modalWidth,
-            buttonCenterX: buttonCenterX,
-            // Store if modal is above or below for triangle positioning
-            isAbove: wouldOverflowBottom
+  const showMonthSelectionModal = async () => {
+    try {
+      setIsLoading(true);
+      
+      // Get the list of accessible months
+      const months = await getAccessibleMonths();
+      
+      // Set the months in state
+      setAccessibleMonths(months);
+      
+      // Now measure and show the modal
+      setTimeout(() => {
+        if (monthButtonRef.current) {
+          monthButtonRef.current.measureInWindow((x, y, width, height) => {
+            // Get screen dimensions for responsive calculations
+            const screenWidth = Dimensions.get('window').width;
+            const screenHeight = Dimensions.get('window').height;
+            
+            // Make the modal width responsive to screen size
+            const modalWidth = Math.min(240, screenWidth * 0.65);
+            
+            // Calculate position that ensures the modal stays on screen
+            const buttonCenterX = x + (width / 2);
+            
+            // Ensure the modal doesn't go off the left or right edges
+            const modalLeft = Math.max(
+              16, // Minimum left margin
+              Math.min(
+                buttonCenterX - (modalWidth / 2), // Center under button
+                screenWidth - modalWidth - 16 // Maximum right position
+              )
+            );
+            
+            // Check if the modal would go off the bottom of the screen
+            const wouldOverflowBottom = (y + height + 260) > screenHeight; // 260 is approx modal height
+            
+            // Position modal above or below button depending on space
+            const modalTop = wouldOverflowBottom 
+              ? y - 260 - 8 // Position above with gap
+              : y + height - 1; // Position below with overlap for connected appearance
+            
+            setMonthModalPosition({
+              top: modalTop,
+              left: modalLeft,
+              width: modalWidth,
+              buttonCenterX: buttonCenterX,
+              // Store if modal is above or below for triangle positioning
+              isAbove: wouldOverflowBottom
+            });
+            
+            // Set year to current year from the date
+            setTempYear(parseInt(currentMonth.substring(0, 4)));
+            
+            // Show and animate the modal with appropriate direction
+            setMonthSelectionModalVisible(true);
+            Animated.timing(monthModalAnimVal, {
+              toValue: 1,
+              duration: 200,
+              useNativeDriver: true,
+            }).start();
           });
-          
-          // Set year to current year from the date
-          setTempYear(parseInt(currentMonth.substring(0, 4)));
-          
-          // Show and animate the modal with appropriate direction
-          setMonthSelectionModalVisible(true);
-          Animated.timing(monthModalAnimVal, {
-            toValue: 1,
-            duration: 200,
-            useNativeDriver: true,
-          }).start();
-        });
-      }
-    }, 50);
+        }
+      }, 50);
+    } catch (error) {
+      console.error('Error loading accessible months:', error);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Function to hide the month selection modal
@@ -772,6 +837,9 @@ const BudgetScreen = ({ navigation }) => {
       setMonthSelectionModalVisible(false);
     });
   };
+
+  // Add state for accessible months
+  const [accessibleMonths, setAccessibleMonths] = useState([]);
 
   return (
     <View style={styles.container}>
@@ -795,7 +863,7 @@ const BudgetScreen = ({ navigation }) => {
                 <TouchableOpacity 
                   ref={monthButtonRef}
                   onPress={showMonthSelectionModal}
-                  style={styles.monthButton}
+                  style={styles.monthButton}    
                   activeOpacity={0.7}
                 >
                   <Text style={styles.monthTitle}>{formattedMonth}</Text>
@@ -804,7 +872,7 @@ const BudgetScreen = ({ navigation }) => {
               
               <IconButton 
                 icon="chevron-right" 
-                size={20} 
+                size={20}  
                 onPress={() => handleMonthChange('next')}
                 style={styles.monthArrow}
               />
@@ -848,7 +916,7 @@ const BudgetScreen = ({ navigation }) => {
         <FlatList
           ref={budgetListRef}
           data={categories}
-          renderItem={renderCategoryItem}
+          renderItem={renderCategoryItem}    
           keyExtractor={item => item.id}
           contentContainerStyle={styles.listContainer}
           scrollEnabled={true} // Always enable scrolling
@@ -958,7 +1026,7 @@ const BudgetScreen = ({ navigation }) => {
             </View>
             
             <View style={styles.monthGrid}>
-              {months.map((month) => {
+              {accessibleMonths.map((month) => {
                 const isSelected = month.value === currentMonth;
                 return (
                   <TouchableOpacity 
@@ -970,7 +1038,7 @@ const BudgetScreen = ({ navigation }) => {
                     onPress={() => handleSelectMonth(month.value)}
                   >
                     <Text style={[
-                      styles.monthItemText,
+                      styles.monthItemText,    
                       isSelected && styles.selectedMonthItemText
                     ]}>
                       {month.label}
@@ -1001,7 +1069,7 @@ const BudgetScreen = ({ navigation }) => {
                 <TouchableOpacity
                   key={color}
                   style={[
-                    styles.colorOption,
+                    styles.colorOption,   
                     { backgroundColor: color },
                     newCategoryColor === color && styles.selectedColorOption
                   ]}
@@ -1050,7 +1118,7 @@ const BudgetScreen = ({ navigation }) => {
                 <TouchableOpacity
                   key={color}
                   style={[
-                    styles.colorOption,
+                    styles.colorOption,   
                     { backgroundColor: color },
                     editedCategoryColor === color && styles.selectedColorOption
                   ]}

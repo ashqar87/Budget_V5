@@ -10,6 +10,10 @@ import { format } from 'date-fns';
 import { useDatabase } from '../../context/DatabaseContext';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { 
+  updateBudgetFromTransaction,
+  getCategoryBudget
+} from '../../utils/budgetUtils';
 
 // Helper function to safely parse dates
 const safelyParseDate = (dateValue) => {

@@ -11,7 +11,7 @@ import { format } from 'date-fns';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Q } from '../../db/query';
 // Fix: Import the correct function from budgetUtils
-import { updateBudgetFromTransaction, getOrCreateBudget } from '../../utils/budgetUtils';
+import { updateBudgetFromTransaction, getCategoryBudget, getOrCreateBudget } from '../../utils/budgetUtils';
 import { updateBudgetSuccess } from '../../store/slices/budgetSlice';
 
 const AddTransactionScreen = () => {
@@ -220,43 +220,33 @@ const AddTransactionScreen = () => {
           }
         }
         
-        // Update budget if expense
+        // Update budget if expense - USE THE UTILITY FUNCTION INSTEAD OF DIRECT UPDATES
         if (transactionType === 'expense' && selectedCategory) {
           try {
-            // Get current month in YYYY-MM format
-            const currentMonth = format(date, 'yyyy-MM');
+            // Use the updateBudgetFromTransaction utility function
+            const updatedBudget = await updateBudgetFromTransaction({
+              id: transaction.id,
+              amount: parsedAmount,
+              date: transactionTime,
+              type: transactionType,
+              category_id: selectedCategory.id
+            });
             
-            // Fix: Use the correct function name getOrCreateBudget instead of getOrCreateCategoryBudget
-            const budget = await getOrCreateBudget(selectedCategory.id, currentMonth);
-            
-            if (budget) {
-              console.log(`Updating budget for ${selectedCategory.id} in ${currentMonth}: reducing available by ${parsedAmount}`);
+            if (updatedBudget) {
+              console.log(`Budget updated successfully: category ${selectedCategory.id}, new available = ${updatedBudget.available}`);
               
-              // Reduce the available amount by the transaction amount
-              const newAvailable = budget.available - parsedAmount;
-              
-              const budgetsCollection = database.collections.get('category_budgets');
-              await budgetsCollection.update(budget.id, b => {
-                b.available = newAvailable;
-                b.updatedAt = now;
-              });
-              
-              // Update Redux immediately for real-time UI updates
+              // Update Redux immediately
               dispatch(updateBudgetSuccess({
-                id: budget.id,
+                id: updatedBudget.id,
                 changes: {
-                  available: newAvailable,
-                  updatedAt: now.toISOString()
+                  available: updatedBudget.available,
+                  updatedAt: updatedBudget.updatedAt instanceof Date ? 
+                    updatedBudget.updatedAt.toISOString() : updatedBudget.updatedAt
                 }
               }));
-              
-              console.log(`Budget updated successfully: new available = ${newAvailable}`);
-            } else {
-              console.error(`Failed to get/create budget for category ${selectedCategory.id} in ${currentMonth}`);
             }
           } catch (budgetError) {
             console.error('Error updating category budget:', budgetError);
-            // Continue with transaction creation even if budget update fails
           }
         }
         
@@ -306,7 +296,8 @@ const AddTransactionScreen = () => {
         if (accounts.length === 0) {
           // Handle no accounts case
           Alert.alert('No Accounts', 'Please create an account first.');
-          navigation.navigate('AddAccount');
+          // Use proper nested navigation syntax instead of direct 'AddAccount'
+          navigation.navigate('Accounts', { screen: 'AddAccount' });
         } else {
           setShowAccountDialog(true);
         }
