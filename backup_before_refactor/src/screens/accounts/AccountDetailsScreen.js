@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, ScrollView, Alert } from 'react-native';
 import { Text, Card, Title, Paragraph, Button, Dialog, Portal, TextInput, Divider, ActivityIndicator, useTheme } from 'react-native-paper';
-import { useRoute, useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useRoute, useNavigation } from '@react-navigation/native';
 import { useDispatch } from 'react-redux';
 import { format } from 'date-fns';
 import { useDatabase } from '../../context/DatabaseContext';
@@ -25,81 +25,65 @@ const AccountDetailsScreen = () => {
   const [editedBalance, setEditedBalance] = useState('');
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   
-  // Helper function to load data
-  const loadAccountData = async () => {
-    try {
-      setIsLoading(true);
-      console.log('Loading account data for account:', accountId);
-      
-      // Get account
-      const accountsCollection = database.collections.get('accounts');
-      const accountRecord = await accountsCollection.find(accountId);
-      
-      if (!accountRecord) {
-        throw new Error(`Account with ID ${accountId} not found`);
-      }
-      
-      setAccount({
-        id: accountRecord.id,
-        name: accountRecord.name,
-        initialBalance: accountRecord.initialBalance,
-        currentBalance: accountRecord.currentBalance,
-        accountType: accountRecord.accountType,
-        createdAt: accountRecord.createdAt,
-      });
-      
-      setEditedName(accountRecord.name);
-      setEditedBalance(accountRecord.currentBalance.toString());
-      
-      // Get recent transactions for this account
-      const transactionsCollection = database.collections.get('transactions');
-      const recentTransactions = await transactionsCollection
-        .query(
-          Q.where('account_id', accountId),
-          Q.sortBy('date', Q.desc()),
-          Q.take(10)
-        )
-        .fetch();
-      
-      console.log(`Loaded ${recentTransactions.length} recent transactions`);
-      
-      // Fetch category information for each transaction
-      const categoriesCollection = database.collections.get('categories');
-      const categories = await categoriesCollection.query().fetch();
-      
-      // Attach category information to transactions
-      const transactionsWithCategories = recentTransactions.map(transaction => {
-        const category = categories.find(cat => cat.id === transaction.category_id);
-        return {
-          ...transaction,
-          category: category || null
-        };
-      });
-      
-      setTransactions(transactionsWithCategories);
-    } catch (error) {
-      console.error('Error loading account data:', error);
-      Alert.alert('Error', `Failed to load account: ${error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Initial load
   useEffect(() => {
+    const loadAccountData = async () => {
+      try {
+        setIsLoading(true);
+        
+        // Get account
+        const accountsCollection = database.collections.get('accounts');
+        const accountRecord = await accountsCollection.find(accountId);
+        
+        if (!accountRecord) {
+          throw new Error(`Account with ID ${accountId} not found`);
+        }
+        
+        setAccount({
+          id: accountRecord.id,
+          name: accountRecord.name,
+          initialBalance: accountRecord.initialBalance,
+          currentBalance: accountRecord.currentBalance,
+          accountType: accountRecord.accountType,
+          createdAt: accountRecord.createdAt,
+        });
+        
+        setEditedName(accountRecord.name);
+        setEditedBalance(accountRecord.currentBalance.toString());
+        
+        // Get recent transactions for this account
+        const transactionsCollection = database.collections.get('transactions');
+        const recentTransactions = await transactionsCollection
+          .query(
+            Q.where('account_id', accountId),
+            Q.sortBy('date', Q.desc()),
+            Q.take(10)
+          )
+          .fetch();
+        
+        // Fetch category information for each transaction
+        const categoriesCollection = database.collections.get('categories');
+        const categories = await categoriesCollection.query().fetch();
+        
+        // Attach category information to transactions
+        const transactionsWithCategories = recentTransactions.map(transaction => {
+          const category = categories.find(cat => cat.id === transaction.category_id);
+          return {
+            ...transaction,
+            category: category || null
+          };
+        });
+        
+        setTransactions(transactionsWithCategories);
+      } catch (error) {
+        console.error('Error loading account data:', error);
+        setError(error.message);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    
     loadAccountData();
   }, [database, accountId]);
-  
-  // Reload data when screen is focused again
-  useFocusEffect(
-    useCallback(() => {
-      console.log('Account details screen focused - reloading data');
-      loadAccountData();
-      return () => {
-        // Cleanup function if needed
-      };
-    }, [accountId, database])
-  );
   
   const handleEdit = () => {
     setIsEditing(true);
@@ -132,14 +116,11 @@ const AccountDetailsScreen = () => {
         // Calculate balance difference
         const balanceDifference = newBalance - accountRecord.currentBalance;
         
-        // Create a current date once to use consistently
-        const updateDate = new Date();
-        
-        // Fix: Use accountsCollection.update instead of accountRecord.update
-        await accountsCollection.update(accountId, account => {
+        // Update account name and balance first
+        await accountRecord.update(account => {
           account.name = editedName.trim();
           account.currentBalance = newBalance;
-          account.updatedAt = updateDate;
+          account.updatedAt = new Date();
         });
         
         // Create adjustment transaction if balance was changed
@@ -149,20 +130,20 @@ const AccountDetailsScreen = () => {
             transaction.payee = 'Balance Adjustment';
             transaction.notes = 'Manual balance adjustment';
             transaction.type = balanceDifference > 0 ? 'income' : 'expense';
-            transaction.account_id = accountId;
-            transaction.date = updateDate.getTime();
-            transaction.createdAt = updateDate;
-            transaction.updatedAt = updateDate;
+            transaction.account_id = accountId; // Direct ID assignment
+            transaction.date = new Date().getTime(); // Store as timestamp
+            transaction.createdAt = new Date();
+            transaction.updatedAt = new Date();
           });
         }
         
-        // Important: Convert the Date to ISO string before dispatching to Redux
+        // Update Redux store with all new account properties
         dispatch(updateAccountSuccess({
           id: accountRecord.id,
           changes: {
             name: editedName.trim(),
             currentBalance: newBalance,
-            updatedAt: updateDate.toISOString() // Convert Date to string here
+            updatedAt: new Date()
           }
         }));
         
@@ -171,7 +152,6 @@ const AccountDetailsScreen = () => {
           ...account,
           name: editedName.trim(),
           currentBalance: newBalance,
-          updatedAt: updateDate.toISOString() // Also update local state with string
         });
         
         setIsEditing(false);
@@ -290,8 +270,6 @@ const AccountDetailsScreen = () => {
           showViewAll={transactions.length > 0}
           onViewAll={handleViewAllTransactions}
           emptyMessage="No transactions yet"
-          useScrollView={true} // Use direct rendering inside ScrollView
-          navigation={navigation} // Pass navigation directly
         />
       </View>
       

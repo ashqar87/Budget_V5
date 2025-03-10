@@ -26,9 +26,6 @@ import AddTransactionScreen from '../screens/transactions/AddTransactionScreen';
 // Import the update function
 import { syncReadyToAssignWithBudgets } from '../utils/budgetUtils';
 
-// Import the new screen
-import TransactionDetailScreen from '../screens/transactions/TransactionDetailScreen';
-
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
 
@@ -96,11 +93,6 @@ const TransactionsStack = () => {
         name="AddTransaction" 
         component={AddTransactionScreen} 
         options={{ title: 'Add Transaction' }}
-      />
-      <Stack.Screen 
-        name="TransactionDetail" // THIS IS THE CORRECT SCREEN NAME IN THE STACK
-        component={TransactionDetailScreen} 
-        options={{ title: 'Transaction Details' }}
       />
     </Stack.Navigator>
   );

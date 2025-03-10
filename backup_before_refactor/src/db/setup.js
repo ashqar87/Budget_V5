@@ -6,41 +6,6 @@ import { Platform } from 'react-native';
 const CACHE_TTL = Platform.OS === 'web' ? 10000 : 60000; // 10s for web, 60s for mobile
 const CACHE_DEBOUNCE = Platform.OS === 'web' ? 50 : 300; // 50ms for web, 300ms for mobile
 
-// Add operation queue to prevent concurrent AsyncStorage operations
-const operationQueue = {
-  queue: [],
-  isProcessing: false,
-  
-  add: function(operation) {
-    return new Promise((resolve, reject) => {
-      this.queue.push({ operation, resolve, reject });
-      if (!this.isProcessing) {
-        this.processNext();
-      }
-    });
-  },
-  
-  processNext: async function() {
-    if (this.queue.length === 0) {
-      this.isProcessing = false;
-      return;
-    }
-    
-    this.isProcessing = true;
-    const { operation, resolve, reject } = this.queue.shift();
-    
-    try {
-      const result = await operation();
-      resolve(result);
-    } catch (error) {
-      reject(error);
-    } finally {
-      // Process next operation after a small delay
-      setTimeout(() => this.processNext(), 5);
-    }
-  }
-};
-
 // Modify the memoryCache implementation
 const memoryCache = {
   data: {},
@@ -71,20 +36,25 @@ const memoryCache = {
       }
     }
     
-    // Create a new promise for this operation and add to queue
-    const operation = operationQueue.add(async () => {
+    // Create a new promise for this operation
+    const operation = new Promise(async (resolve, reject) => {
       try {
+        // Add a small delay to handle batched requests
+        if (Platform.OS !== 'web') {
+          await new Promise(r => setTimeout(r, CACHE_DEBOUNCE));
+        }
+        
         const value = await AsyncStorage.getItem(key);
         const parsed = value ? JSON.parse(value) : [];
         
         // Update cache
         memoryCache.data[key] = parsed;
-        memoryCache.timestamp[key] = Date.now();
+        memoryCache.timestamp[key] = now;
         
-        return parsed;
+        resolve(parsed);
       } catch (error) {
         console.error(`Cache error for ${key}:`, error);
-        throw error;
+        reject(error);
       } finally {
         // Clear the pending operation
         delete memoryCache.pendingOperations[key];
@@ -109,23 +79,17 @@ const memoryCache = {
         clearTimeout(memoryCache.pendingOperations[`write_${key}`]);
       }
       
-      // Queue write operation with debounce
-      const writePromise = new Promise((resolve) => {
-        memoryCache.pendingOperations[`write_${key}`] = setTimeout(() => {
-          operationQueue.add(async () => {
-            try {
-              await AsyncStorage.setItem(key, JSON.stringify(value));
-              delete memoryCache.pendingOperations[`write_${key}`];
-              return true;
-            } catch (error) {
-              console.error(`Cache set error for ${key}:`, error);
-              return false;
-            }
-          }).then(resolve);
-        }, CACHE_DEBOUNCE);
-      });
+      memoryCache.pendingOperations[`write_${key}`] = setTimeout(async () => {
+        try {
+          await AsyncStorage.setItem(key, JSON.stringify(value));
+        } catch (error) {
+          console.error(`Cache set error for ${key}:`, error);
+        } finally {
+          delete memoryCache.pendingOperations[`write_${key}`];
+        }
+      }, CACHE_DEBOUNCE);
       
-      return true; // Return immediately without waiting for write
+      return true;
     } catch (error) {
       console.error(`Cache set error for ${key}:`, error);
       return false;
@@ -294,13 +258,6 @@ export const database = {
             newRecord.updatedAt = newRecord.updatedAt.toISOString();
           }
           
-          // If creator provided date objects, convert to ISO strings for storage
-          for (const [key, value] of Object.entries(newRecord)) {
-            if (value instanceof Date) {
-              newRecord[key] = value.toISOString();
-            }
-          }
-          
           // Add to items array
           items.push(newRecord);
           
@@ -320,44 +277,20 @@ export const database = {
           const index = items.findIndex(item => item.id === id);
           
           if (index !== -1) {
-            // Make a deep copy of the original item to avoid mutation issues
-            const originalItem = JSON.parse(JSON.stringify(items[index]));
-            let updatedItem = {...originalItem};
-            
-            // Apply updates using either function or object
+            // Apply updates directly to the object
             if (typeof updater === 'function') {
-              // Create a clone to pass to the updater function
-              const tempItem = {...updatedItem};
-              updater(tempItem);
-              // Copy updated properties back
-              Object.assign(updatedItem, tempItem);
+              updater(items[index]);
             } else if (typeof updater === 'object') {
-              Object.assign(updatedItem, updater);
+              Object.assign(items[index], updater);
             }
             
-            // Ensure updatedAt is always set
-            updatedItem.updatedAt = new Date().toISOString();
+            items[index].updatedAt = new Date().toISOString();
             
-            // Parse any number fields to ensure they're stored as numbers
-            if (updatedItem.assigned !== undefined) {
-              updatedItem.assigned = parseFloat(updatedItem.assigned);
-            }
-            if (updatedItem.available !== undefined) {
-              updatedItem.available = parseFloat(updatedItem.available);
-            }
+            // Ensure all dates are serialized
+            items[index] = ensureDatesAreSerialized(items[index]);
             
-            // Replace the item in the array
-            items[index] = updatedItem;
-            
-            // Debug the update
-            console.log(`Updated ${name} item ${id}:`, {
-              before: originalItem,
-              after: updatedItem
-            });
-            
-            // Save to storage
             await memoryCache.set(name, items);
-            return updatedItem;
+            return items[index];
           }
           return null;
         } catch (error) {
@@ -415,7 +348,7 @@ export const database = {
   },
 };
 
-// Initialize default data - optimize to prevent freezing
+// Initialize default data
 export const setupDatabase = async () => {
   try {
     console.log("Setting up database with AsyncStorage...");
@@ -423,12 +356,8 @@ export const setupDatabase = async () => {
     // Initialize all collections to ensure they exist
     const collections = ['categories', 'category_budgets', 'accounts', 'transactions'];
     
-    // Process collections sequentially with non-blocking delays
     for (const collection of collections) {
       try {
-        // Add a small delay between collections to avoid UI freezing
-        await new Promise(resolve => setTimeout(resolve, 5));
-        
         // Try to get existing data
         const value = await AsyncStorage.getItem(collection);
         let data;
@@ -461,40 +390,40 @@ export const setupDatabase = async () => {
               name: 'Food & Dining', 
               icon: 'food', 
               color: '#4CAF50', 
-              createdAt: new Date().toISOString(), 
-              updatedAt: new Date().toISOString() 
+              createdAt: new Date(), 
+              updatedAt: new Date() 
             },
             { 
               id: '2', 
               name: 'Housing', 
               icon: 'home', 
               color: '#2196F3', 
-              createdAt: new Date().toISOString(), 
-              updatedAt: new Date().toISOString() 
+              createdAt: new Date(), 
+              updatedAt: new Date() 
             },
             { 
               id: '3', 
               name: 'Transportation', 
               icon: 'car', 
               color: '#FFC107', 
-              createdAt: new Date().toISOString(), 
-              updatedAt: new Date().toISOString() 
+              createdAt: new Date(), 
+              updatedAt: new Date() 
             },
             { 
               id: '4', 
               name: 'Entertainment', 
               icon: 'movie', 
               color: '#9C27B0', 
-              createdAt: new Date().toISOString(), 
-              updatedAt: new Date().toISOString() 
+              createdAt: new Date(), 
+              updatedAt: new Date() 
             },
             { 
               id: '5', 
               name: 'Healthcare', 
               icon: 'medical-bag', 
               color: '#F44336', 
-              createdAt: new Date().toISOString(), 
-              updatedAt: new Date().toISOString() 
+              createdAt: new Date(), 
+              updatedAt: new Date() 
             }
           ];
           

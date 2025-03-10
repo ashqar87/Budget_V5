@@ -2,25 +2,20 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, StyleSheet, FlatList, Alert, TouchableOpacity, Animated, Dimensions } from 'react-native';
 import { Text, Button, Card, Title, TextInput, IconButton, Dialog, Portal, RadioButton, FAB, useTheme, ActivityIndicator } from 'react-native-paper';
 import { useSelector, useDispatch } from 'react-redux';
-import { 
-  fetchBudgetsStart, 
-  fetchBudgetsSuccess, 
-  fetchBudgetsFailure, 
-  setCurrentMonth,
-  updateBudgetSuccess  // Add this import
-} from '../../store/slices/budgetSlice';
+import { fetchBudgetsStart, fetchBudgetsSuccess, fetchBudgetsFailure, setCurrentMonth } from '../../store/slices/budgetSlice';
 import { fetchCategoriesStart, fetchCategoriesSuccess, updateCategorySuccess, deleteCategorySuccess, addCategorySuccess } from '../../store/slices/categoriesSlice';
 import { updateReadyToAssign } from '../../store/slices/accountsSlice';
 import { format, addMonths, subMonths, parseISO, isAfter } from 'date-fns';
 import { database } from '../../db/setup';
 import { Q } from '../../db/query';
 import { 
-  getOrCreateBudget,
-  assignToBudget,
-  ensureAllCategoryBudgets,
-  calculateReadyToAssign,
-  getBudgetsForMonth,
-  debugBudgets
+  assignToBudget, 
+  getBudgetsForMonth, 
+  syncReadyToAssignWithBudgets, 
+  rolloverBudgetsToNewMonth,
+  autoRolloverBudgets,
+  debugBudgets,
+  resetAndRepairBudgetsForMonth  // Add this import
 } from '../../utils/budgetUtils';
 import BudgetAllocationModal from '../../components/budget/BudgetAllocationModal';
 import { useFocusEffect } from '@react-navigation/native';
@@ -124,7 +119,7 @@ const BudgetScreen = ({ navigation }) => {
   useEffect(() => {
     const loadData = async () => {
       setIsLoading(true);
-      setPerformingRollover(true);
+      setPerformingRollover(true); // Set this to true from the beginning
       
       try {
         // Load categories first for faster UI rendering
@@ -135,15 +130,23 @@ const BudgetScreen = ({ navigation }) => {
         
         console.log(`Loaded ${categoriesData.length} categories for ${currentMonth}`);
         
-        // Ensure all categories have budgets for this month
-        await ensureAllCategoryBudgets(currentMonth);
+        // First repair any broken budgets from data corruption
+        await resetAndRepairBudgetsForMonth(currentMonth, dispatch);
         
-        // Load budgets for the current month
+        // Always force a rollover check to ensure all categories have budgets
+        console.log(`Starting rollover check for ${currentMonth}...`);
+        await autoRolloverBudgets(currentMonth, dispatch);
+        
+        // Add a small delay to ensure all database operations are finished
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        // Now load all budgets for the current month
         const monthBudgets = await getBudgetsForMonth(currentMonth);
         console.log(`Loaded ${monthBudgets.length} budgets for ${currentMonth}`);
+        
         dispatch(fetchBudgetsSuccess(monthBudgets));
         
-        // Debug budgets
+        // Call the imported debugBudgets function
         await debugBudgets(currentMonth);
         
         // Initialize budget input values
@@ -153,56 +156,30 @@ const BudgetScreen = ({ navigation }) => {
         });
         setBudgetValues(initialValues);
         
-        // Update ready to assign amount
-        const readyToAssign = await calculateReadyToAssign(currentMonth);
-        dispatch(updateReadyToAssign(readyToAssign));
+        // Check for missing budgets and log them
+        const missingCategories = categoriesData.filter(cat => 
+          !monthBudgets.some(budget => budget.category_id === cat.id)
+        );
+        
+        if (missingCategories.length > 0) {
+          console.warn(`Missing budgets for ${missingCategories.length} categories:`, 
+            missingCategories.map(c => c.name).join(', '));
+        }
+        
+        // Update ready to assign
+        await syncReadyToAssignWithBudgets(dispatch);
         
       } catch (error) {
         console.error('Error loading budget data:', error);
         dispatch(fetchBudgetsFailure(error.toString()));
       } finally {
         setIsLoading(false);
-        setPerformingRollover(false);
+        setPerformingRollover(false); // Always ensure this is cleared
       }
     };
     
     loadData();
   }, [currentMonth, dispatch]);
-
-  // Add useFocusEffect to ensure data reloads when navigating back to this screen
-  useFocusEffect(
-    React.useCallback(() => {
-      const loadData = async () => {
-        // Only reload data if not already loading
-        if (!isLoading) {
-          console.log('Screen focused, refreshing budget data');
-          setIsLoading(true);
-          
-          try {
-            // Ensure all categories have budgets for current month
-            await ensureAllCategoryBudgets(currentMonth);
-            
-            // Reload budgets for the current month
-            const monthBudgets = await getBudgetsForMonth(currentMonth);
-            console.log(`Reloaded ${monthBudgets.length} budgets for ${currentMonth}`);
-            
-            // Update Redux store
-            dispatch(fetchBudgetsSuccess(monthBudgets));
-            
-            // Update ready to assign amount
-            const readyToAssign = await calculateReadyToAssign(currentMonth);
-            dispatch(updateReadyToAssign(readyToAssign));
-          } catch (error) {
-            console.error('Error reloading budget data:', error);
-          } finally {
-            setIsLoading(false);
-          }
-        }
-      };
-      
-      loadData();
-    }, [currentMonth, dispatch])
-  );
 
   const handleBudgetChange = (categoryId, value) => {
     setBudgetValues({
@@ -379,53 +356,52 @@ const BudgetScreen = ({ navigation }) => {
     }
   };
   
-  // Handle saving allocation - fix to ensure proper error handling
+  // Handle saving allocation
   const handleSaveAllocation = async (amount) => {
-    if (!selectedCategoryForAllocation) return false;
+    if (!selectedCategoryForAllocation) return;
     
     const parsedAmount = parseFloat(amount);
     if (isNaN(parsedAmount) || parsedAmount < 0) {
       Alert.alert('Invalid Amount', 'Please enter a valid budget amount');
-      return false;
+      return;
     }
 
-    try {
-      console.log(`Attempting to save allocation: ${parsedAmount} for category ${selectedCategoryForAllocation.id}`);
-      
-      // Use the improved assignToBudget function
-      const result = await assignToBudget(
-        selectedCategoryForAllocation.id,
-        currentMonth, 
-        parsedAmount,
-        dispatch  // Pass dispatch directly to ensure Redux gets updated
+    const existingBudget = budgets.find(
+      b => b.category_id === selectedCategoryForAllocation.id && b.month === currentMonth
+    );
+    const previousAmount = existingBudget ? existingBudget.assigned : 0;
+    
+    // Calculate difference to update readyToAssign
+    const difference = parsedAmount - previousAmount;
+    
+    // Check if there's enough to assign
+    if (difference > 0 && readyToAssign < difference) {
+      Alert.alert(
+        'Insufficient Funds', 
+        `You only have $${readyToAssign.toFixed(2)} available to assign.`
       );
+      return false;
+    }
+    
+    const success = await assignToBudget(
+      selectedCategoryForAllocation.id, 
+      currentMonth, 
+      parsedAmount, 
+      dispatch
+    );
+    
+    if (success) {
+      // Update the budgetValues state to reflect the new amount
+      setBudgetValues({
+        ...budgetValues,
+        [selectedCategoryForAllocation.id]: parsedAmount.toString()
+      });
       
-      console.log("Budget assignment result:", result);
-      
-      if (result) {
-        // Force refresh budgets from database after successful save
-        const updatedBudgets = await getBudgetsForMonth(currentMonth);
-        console.log(`Refreshed ${updatedBudgets.length} budgets after allocation`);
-        
-        // Update Redux with fresh data
-        dispatch(fetchBudgetsSuccess(updatedBudgets));
-        
-        // Update local state
-        setBudgetValues({
-          ...budgetValues,
-          [selectedCategoryForAllocation.id]: parsedAmount.toString()
-        });
-        
-        // Close modal after saving
-        setAllocationModalVisible(false);
-        return true;
-      } else {
-        Alert.alert('Error', 'Failed to update budget');
-        return false;
-      }
-    } catch (error) {
-      console.error('Error saving allocation:', error);
-      Alert.alert('Error', `Failed to update budget: ${error.message}`);
+      // Close modal after saving
+      setAllocationModalVisible(false);
+      return true;
+    } else {
+      Alert.alert('Error', 'Failed to update budget');
       return false;
     }
   };

@@ -17,7 +17,7 @@ const AddAccountScreen = () => {
   const [balance, setBalance] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   
-  const handleSubmit = async () => {
+  const handleCreateAccount = async () => {
     if (!name.trim()) {
       Alert.alert('Error', 'Please enter an account name');
       return;
@@ -32,49 +32,39 @@ const AddAccountScreen = () => {
     try {
       setIsSubmitting(true);
       
-      await database.action(async () => {
-        const accountsCollection = database.collections.get('accounts');
+      // Create the account
+      const accountsCollection = database.collections.get('accounts');
+      const newAccount = await accountsCollection.create(account => {
+        account.name = name.trim();
+        account.accountType = accountType;
+        account.initialBalance = initialBalance;
+        account.currentBalance = initialBalance;
+      });
+      
+      // Create an initial balance transaction if balance is not zero
+      if (initialBalance !== 0) {
         const transactionsCollection = database.collections.get('transactions');
-        
-        // Create account with proper dates
-        const now = new Date();
-        const nowTimestamp = now.getTime(); // Convert to timestamp for consistency
-        
-        const account = await accountsCollection.create(account => {
-          account.name = name.trim();
-          account.accountType = accountType;
-          account.initialBalance = initialBalance;
-          account.currentBalance = initialBalance;
-          account.createdAt = now;
-          account.updatedAt = now;
-        });
-        
-        // Create initial transaction with proper timestamp - not Date object
-        await transactionsCollection.create(transaction => {
-          transaction.amount = initialBalance;
+        const newTransaction = await transactionsCollection.create(transaction => {
+          transaction.account_id = newAccount.id; // Direct assignment for AsyncStorage implementation
+          transaction.amount = Math.abs(initialBalance);
+          transaction.type = initialBalance > 0 ? 'income' : 'expense';
           transaction.payee = 'Initial Balance';
           transaction.notes = 'Account opening balance';
-          transaction.type = 'income';
-          transaction.account_id = account.id;
-          // Store date as a timestamp or ISO string, not a Date object
-          transaction.date = nowTimestamp; 
-          transaction.createdAt = now;
-          transaction.updatedAt = now;
+          transaction.date = new Date();
         });
         
-        // Convert any Date objects to ISO strings for Redux
-        const serializedAccount = {
-          ...account,
-          createdAt: account.createdAt.toISOString(),
-          updatedAt: account.updatedAt.toISOString()
-        };
-        
-        // Dispatch with serialized dates
-        dispatch(addAccountSuccess(serializedAccount));
-        
-        // Navigate back
-        navigation.goBack();
-      });
+        // Also update the transactions Redux store
+        dispatch(addTransactionSuccess({
+          ...newTransaction,
+          account: newAccount
+        }));
+      }
+      
+      // Update Redux store with the new account
+      dispatch(addAccountSuccess(newAccount));
+      
+      // Navigate back
+      navigation.goBack();
     } catch (error) {
       console.error('Error creating account:', error);
       Alert.alert('Error', 'Failed to create account. Please try again.');
@@ -118,7 +108,7 @@ const AddAccountScreen = () => {
         
         <Button
           mode="contained"
-          onPress={handleSubmit}
+          onPress={handleCreateAccount}
           style={styles.button}
           loading={isSubmitting}
           disabled={isSubmitting}

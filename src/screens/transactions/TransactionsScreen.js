@@ -1,17 +1,63 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { View, StyleSheet, FlatList, Dimensions } from 'react-native';
-import { FAB, Searchbar, Chip, Text, ActivityIndicator, Button, Dialog, Portal, useTheme } from 'react-native-paper';
+import React, { useEffect, useState, useCallback } from 'react';
+import { 
+  View, 
+  StyleSheet, 
+  FlatList, 
+  TouchableOpacity, 
+  Text as RNText, 
+  Alert,
+  ActivityIndicator,
+  SafeAreaView,
+  ScrollView 
+} from 'react-native';
+import { Searchbar, FAB, Chip, Portal, Dialog, Button, useTheme } from 'react-native-paper';
+import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
 import { useDispatch, useSelector } from 'react-redux';
-import { useNavigation, useRoute } from '@react-navigation/native';
 import { format, subMonths } from 'date-fns';
 import { useDatabase } from '../../context/DatabaseContext';
 import { Q } from '../../db/query';
-import { fetchTransactionsStart, fetchTransactionsSuccess, fetchTransactionsFailure, updateFilters, clearFilters } from '../../store/slices/transactionsSlice';
-import TransactionsList from '../../components/transactions/TransactionsList';
+import { 
+  fetchTransactionsStart, 
+  fetchTransactionsSuccess, 
+  fetchTransactionsFailure, 
+  updateFilters, 
+  clearFilters 
+} from '../../store/slices/transactionsSlice';
 import EmptyState from '../../components/common/EmptyState';
 
-// Get device dimensions
-const { width, height } = Dimensions.get('window');
+// Simplify the transaction item to just the essentials
+const TransactionItem = React.memo(({ item, onPress }) => {
+  const theme = useTheme();
+  const isExpense = item.type === 'expense';
+  const amountColor = isExpense ? '#D32F2F' : '#388E3C';
+  const amountPrefix = isExpense ? '-' : '+';
+  
+  return (
+    <TouchableOpacity
+      style={styles.transactionCard}
+      onPress={() => onPress(item)}
+      activeOpacity={0.7}
+    >
+      <View style={styles.transactionRow}>
+        <View style={styles.transactionContent}>
+          <RNText style={styles.payeeText}>{item.payee}</RNText>
+          <RNText style={styles.categoryText}>
+            {item.category?.name || 'Uncategorized'}
+          </RNText>
+        </View>
+        
+        <View style={styles.amountContainer}>
+          <RNText style={[styles.amountText, { color: amountColor }]}>
+            {amountPrefix}${Math.abs(item.amount).toFixed(2)}
+          </RNText>
+          <RNText style={styles.dateText}>
+            {format(new Date(item.date), 'MMM d')}
+          </RNText>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+});
 
 const TransactionsScreen = () => {
   const navigation = useNavigation();
@@ -20,349 +66,324 @@ const TransactionsScreen = () => {
   const database = useDatabase();
   const dispatch = useDispatch();
   
-  // Get preselected account filter if coming from account details
+  // Account ID from route params
   const accountId = route.params?.accountId;
   
-  // Use ref to track if initial load has completed
-  const initialLoadComplete = useRef(false);
-  const isFirstRender = useRef(true);
+  // Use a reference to prevent unnecessary rerenders
+  const accountIdRef = React.useRef(accountId);
   
-  const { transactions, status, filters = {} } = useSelector(state => state.transactions);
-  const { accounts } = useSelector(state => state.accounts);
-  const { categories } = useSelector(state => state.categories);
+  // Access Redux state safely
+  const transactions = useSelector(state => state.transactions?.transactions || []);
+  const status = useSelector(state => state.transactions?.status || 'idle');
+  const filters = useSelector(state => state.transactions?.filters || {});
+  const accounts = useSelector(state => state.accounts?.accounts || []);
+  const categories = useSelector(state => state.categories?.categories || []);
   
-  // Store the current filters in a ref to prevent unnecessary re-renders
-  const filtersRef = useRef(filters);
-  
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isFilterDialogVisible, setIsFilterDialogVisible] = useState(false);
+  // Local state
   const [isLoading, setIsLoading] = useState(true);
-  
-  // Local filter state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterDialogVisible, setFilterDialogVisible] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState(accountId || null);
   const [selectedCategoryId, setSelectedCategoryId] = useState(null);
   const [dateRange, setDateRange] = useState('all');
   
-  // Set initial account filter only ONCE when component mounts
+  // Only fetch once when component mounts
   useEffect(() => {
-    if (isFirstRender.current && accountId && !filters.accountId) {
-      dispatch(updateFilters({ accountId }));
-      isFirstRender.current = false;
+    if (accountIdRef.current && !filters.accountId) {
+      dispatch(updateFilters({ accountId: accountIdRef.current }));
     }
-  }, [accountId, dispatch, filters]);
+  }, [dispatch, filters]);
   
-  // Load transactions whenever filters change
-  useEffect(() => {
-    // Update the ref with current filters
-    filtersRef.current = filters;
+  // Focus effect to reload data only when filters change
+  useFocusEffect(
+    useCallback(() => {
+      loadTransactions();
+    }, [filters]) // Only reload when filters change
+  );
+  
+  const loadTransactions = async () => {
+    // Skip if already loading
+    if (status === 'loading') return;
     
-    const loadTransactions = async () => {
-      // Skip if we're already loading
-      if (status === 'loading') return;
+    try {
+      setIsLoading(true);
+      dispatch(fetchTransactionsStart());
       
-      try {
-        dispatch(fetchTransactionsStart());
-        setIsLoading(true);
-        
-        // Short timeout to prevent excessive AsyncStorage calls
-        await new Promise(resolve => setTimeout(resolve, 50));
-        
-        // Start building the query
-        const transactionsCollection = database.collections.get('transactions');
-        
-        // Build query conditions
-        const queryConditions = [];
-        
-        // Add account filter
-        if (filters.accountId) {
-          queryConditions.push(Q.where('account_id', filters.accountId));
-        }
-        
-        // Add category filter
-        if (filters.categoryId) {
-          queryConditions.push(Q.where('category_id', filters.categoryId));
-        }
-        
-        // Add date range filter
-        if (filters.dateRange && filters.dateRange !== 'all') {
-          const now = new Date();
-          let startDate;
-          
-          switch (filters.dateRange) {
-            case 'thisMonth':
-              startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-              break;
-            case 'last30Days':
-              startDate = subMonths(now, 1);
-              break;
-            case 'last3Months':
-              startDate = subMonths(now, 3);
-              break;
-            case 'lastYear':
-              startDate = subMonths(now, 12);
-              break;
-            default:
-              startDate = null;
-          }
-          
-          if (startDate) {
-            queryConditions.push(Q.where('date', Q.gte(startDate.getTime())));
-          }
-        }
-        
-        // Sort by date descending
-        queryConditions.push(Q.sortBy('date', Q.desc()));
-        
-        // Execute the query
-        const transactionsData = await transactionsCollection.query(...queryConditions).fetch();
-        
-        if (transactionsData && transactionsData.length > 0) {
-          // Get unique category and account IDs to minimize data fetching
-          const uniqueCategoryIds = [...new Set(transactionsData
-            .filter(t => t.category_id)
-            .map(t => t.category_id))];
-            
-          const uniqueAccountIds = [...new Set(transactionsData
-            .filter(t => t.account_id)
-            .map(t => t.account_id))];
-          
-          // Get all categories and accounts (use cache)
-          const categoriesCollection = database.collections.get('categories');
-          const accountsCollection = database.collections.get('accounts');
-          
-          const [categoriesData, accountsData] = await Promise.all([
-            categoriesCollection.query().fetch(),
-            accountsCollection.query().fetch()
-          ]);
-          
-          // Create lookup maps for faster access
-          const categoriesMap = {};
-          categoriesData.forEach(category => {
-            categoriesMap[category.id] = category;
-          });
-          
-          const accountsMap = {};
-          accountsData.forEach(account => {
-            accountsMap[account.id] = account;
-          });
-          
-          // Enrich transactions with category and account data
-          const enrichedTransactions = transactionsData.map(transaction => {
-            // Find the related category and account objects
-            const category = transaction.category_id ? categoriesMap[transaction.category_id] : null;
-            const account = transaction.account_id ? accountsMap[transaction.account_id] : null;
-            
-            return {
-              ...transaction,
-              category,
-              account
-            };
-          });
-          
-          // Ensure dates are properly serialized
-          const serializedTransactions = enrichedTransactions.map(transaction => {
-            // Clone to avoid mutating the original
-            const serialized = {...transaction};
-            
-            // Ensure dates are serialized consistently
-            if (serialized.createdAt instanceof Date) {
-              serialized.createdAt = serialized.createdAt.toISOString();
-            }
-            if (serialized.updatedAt instanceof Date) {
-              serialized.updatedAt = serialized.updatedAt.toISOString();
-            }
-            
-            return serialized;
-          });
-          
-          // Ensure we're using the latest filters when dispatching
-          const currentFilters = filtersRef.current;
-          
-          // Only dispatch if this is still the current filter set
-          if (JSON.stringify(currentFilters) === JSON.stringify(filters)) {
-            dispatch(fetchTransactionsSuccess(serializedTransactions));
-            initialLoadComplete.current = true;
-          }
-        } else {
-          dispatch(fetchTransactionsSuccess([]));
-          initialLoadComplete.current = true;
-        }
-      } catch (error) {
-        console.error('Error loading transactions:', error);
-        dispatch(fetchTransactionsFailure(error.toString()));
-      } finally {
-        setIsLoading(false);
+      const queryConditions = [];
+      
+      if (filters.accountId) {
+        queryConditions.push(Q.where('account_id', filters.accountId));
       }
-    };
+      
+      if (filters.categoryId) {
+        queryConditions.push(Q.where('category_id', filters.categoryId));
+      }
+      
+      if (filters.dateRange && filters.dateRange !== 'all') {
+        const now = new Date();
+        let startDate;
+        
+        switch (filters.dateRange) {
+          case 'thisMonth': 
+            startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+            break;
+          case 'last30Days':
+            startDate = subMonths(now, 1);
+            break;
+          default:
+            startDate = null;
+        }
+        
+        if (startDate) {
+          queryConditions.push(Q.where('date', Q.gte(startDate.getTime())));
+        }
+      }
+      
+      queryConditions.push(Q.sortBy('date', Q.desc()));
+      
+      const transactionsCollection = database.collections.get('transactions');
+      const transactionsData = await transactionsCollection.query(...queryConditions).fetch();
+      
+      // Process transactions minimally
+      const processedTransactions = await processTransactions(transactionsData);
+      
+      dispatch(fetchTransactionsSuccess(processedTransactions));
+    } catch (error) {
+      console.error('Error loading transactions:', error);
+      dispatch(fetchTransactionsFailure(error.message));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  // Process transactions with minimal data for better performance
+  const processTransactions = async (transactionsData) => {
+    if (!transactionsData.length) return [];
     
-    loadTransactions();
-  }, [dispatch, filters, database, status]);
-
-  // Rest of the component (handleSearch, handleFilterPress, etc. remains the same)
-  // ...
+    try {
+      // Get categories (we'll need them for display)
+      const categoriesCollection = database.collections.get('categories');
+      const categoriesData = await categoriesCollection.query().fetch();
+      
+      // Create category lookup map
+      const categoryMap = {};
+      categoriesData.forEach(cat => {
+        categoryMap[cat.id] = { 
+          id: cat.id, 
+          name: cat.name, 
+          color: cat.color 
+        };
+      });
+      
+      // Process transactions with minimal data
+      return transactionsData.map(tx => ({
+        id: tx.id,
+        amount: tx.amount,
+        payee: tx.payee,
+        date: tx.date,
+        type: tx.type,
+        category: tx.category_id ? categoryMap[tx.category_id] : null,
+        account_id: tx.account_id
+      }));
+    } catch (error) {
+      console.error('Error processing transactions:', error);
+      return transactionsData;
+    }
+  };
+  
+  // Direct, simplified navigation
+  const handleTransactionPress = (transaction) => {
+    navigation.navigate('TransactionDetail', {
+      transactionId: transaction.id
+    });
+  };
+  
+  // Initialize filter state
+  useEffect(() => {
+    setSelectedAccountId(filters.accountId || null);
+    setSelectedCategoryId(filters.categoryId || null);
+    setDateRange(filters.dateRange || 'all');
+  }, [filters]);
+  
+  // Apply filters
+  const applyFilters = () => {
+    dispatch(updateFilters({
+      accountId: selectedAccountId,
+      categoryId: selectedCategoryId,
+      dateRange
+    }));
+    setFilterDialogVisible(false);
+  };
+  
+  // Clear all filters
+  const clearAllFilters = () => {
+    setSelectedAccountId(null);
+    setSelectedCategoryId(null);
+    setDateRange('all');
+    dispatch(clearFilters());
+    setFilterDialogVisible(false);
+  };
 
   return (
-    <View style={styles.container}>
-      {/* Header with search and filters */}
-      <View style={styles.header}>
-        <Searchbar
-          placeholder="Search transactions"
-          onChangeText={setSearchQuery}
-          value={searchQuery}
-          style={styles.searchBar}
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        {/* Header */}
+        <View style={styles.header}>
+          <Searchbar
+            placeholder="Search transactions"
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            style={styles.searchBar}
+          />
+          
+          <View style={styles.filterRow}>
+            <Chip
+              icon="filter-variant"
+              onPress={() => setFilterDialogVisible(true)}
+              mode={Object.keys(filters).length > 0 ? 'flat' : 'outlined'}
+              style={styles.filterButton}
+            >
+              Filters {Object.keys(filters).length > 0 ? `(${Object.keys(filters).length})` : ''}
+            </Chip>
+          </View>
+        </View>
+        
+        {/* Content */}
+        {isLoading ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={theme.colors.primary} />
+          </View>
+        ) : transactions.length === 0 ? (
+          <EmptyState
+            icon="cash-multiple"
+            title="No Transactions"
+            message="Add your first transaction to start tracking your spending"
+            buttonLabel="Add Transaction"
+            onButtonPress={() => navigation.navigate('AddTransaction', { accountId: selectedAccountId })}
+          />
+        ) : (
+          <FlatList
+            data={transactions}
+            keyExtractor={item => item.id}
+            renderItem={({ item }) => (
+              <TransactionItem 
+                item={item} 
+                onPress={handleTransactionPress} 
+              />
+            )}
+            contentContainerStyle={styles.listContent}
+          />
+        )}
+        
+        {/* FAB */}
+        <FAB
+          style={[styles.fab, { backgroundColor: theme.colors.primary }]}
+          icon="plus"
+          onPress={() => navigation.navigate('AddTransaction', { accountId: selectedAccountId })}
         />
         
-        <View style={styles.filterChips}>
-          <Chip
-            icon="filter-variant"
-            onPress={() => setIsFilterDialogVisible(true)}
-            style={styles.filterChip}
-            mode={Object.keys(filters).length > 0 ? 'flat' : 'outlined'}
+        {/* Filter dialog */}
+        <Portal>
+          <Dialog
+            visible={filterDialogVisible}
+            onDismiss={() => setFilterDialogVisible(false)}
+            style={styles.filterDialog}
           >
-            Filters
-          </Chip>
-        </View>
+            <Dialog.Title>Filter Transactions</Dialog.Title>
+            <Dialog.Content>
+              {/* Basic dialog content without ScrollView */}
+              <View style={styles.dialogContent}>
+                {/* Account filter */}
+                <RNText style={styles.filterHeading}>Account</RNText>
+                <View style={styles.chipContainer}>
+                  {accounts.map(account => (
+                    <Chip
+                      key={account.id}
+                      selected={selectedAccountId === account.id}
+                      onPress={() => setSelectedAccountId(
+                        selectedAccountId === account.id ? null : account.id
+                      )}
+                      style={styles.filterChip}
+                    >
+                      {account.name}
+                    </Chip>
+                  ))}
+                </View>
+                
+                {/* Date Range */}
+                <RNText style={styles.filterHeading}>Date</RNText>
+                <View style={styles.chipContainer}>
+                  <Chip
+                    selected={dateRange === 'all'}
+                    onPress={() => setDateRange('all')}
+                    style={styles.filterChip}
+                  >
+                    All Time
+                  </Chip>
+                  <Chip
+                    selected={dateRange === 'thisMonth'}
+                    onPress={() => setDateRange('thisMonth')}
+                    style={styles.filterChip}
+                  >
+                    This Month
+                  </Chip>
+                  <Chip
+                    selected={dateRange === 'last30Days'}
+                    onPress={() => setDateRange('last30Days')}
+                    style={styles.filterChip}
+                  >
+                    Last 30 Days
+                  </Chip>
+                </View>
+              </View>
+            </Dialog.Content>
+            <Dialog.Actions>
+              <Button onPress={clearAllFilters}>Clear All</Button>
+              <Button onPress={applyFilters}>Apply</Button>
+            </Dialog.Actions>
+          </Dialog>
+        </Portal>
       </View>
-      
-      {/* Content area with loading indicator, empty state or transactions list */}
-      {isLoading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={theme.colors.primary} />
-        </View>
-      ) : transactions.length === 0 ? (
-        <EmptyState
-          icon="cash"
-          title="No Transactions"
-          message="Add your first transaction to start tracking your spending"
-          buttonLabel="Add Transaction"
-          onButtonPress={() => navigation.navigate('AddTransaction', { accountId: selectedAccountId })}
-        />
-      ) : (
-        <TransactionsList
-          transactions={transactions}
-          onTransactionPress={(transaction) => {
-            console.log('Transaction pressed:', transaction.id);
-          }}
-        />
-      )}
-      
-      {/* FAB for adding new transactions */}
-      <FAB
-        style={[styles.fab, { backgroundColor: theme.colors.primary }]}
-        icon="plus"
-        onPress={() => navigation.navigate('AddTransaction', { accountId: selectedAccountId })}
-      />
-      
-      {/* Filter dialog */}
-      <Portal>
-        <Dialog
-          visible={isFilterDialogVisible}
-          onDismiss={() => setIsFilterDialogVisible(false)}
-          style={[styles.dialog, {maxHeight: height * 0.7}]}
-        >
-          <Dialog.Title>Filter Transactions</Dialog.Title>
-          <Dialog.ScrollArea>
-            <View style={{paddingVertical: 10}}>
-              <Text style={styles.filterLabel}>Account</Text>
-              <View style={styles.accountFilters}>
-                {accounts.map(account => (
-                  <Chip
-                    key={account.id}
-                    selected={selectedAccountId === account.id}
-                    onPress={() => setSelectedAccountId(
-                      selectedAccountId === account.id ? null : account.id
-                    )}
-                    style={styles.filterOptionChip}
-                  >
-                    {account.name}
-                  </Chip>
-                ))}
-              </View>
-              
-              <Text style={styles.filterLabel}>Category</Text>
-              <View style={styles.categoryFilters}>
-                {categories.map(category => (
-                  <Chip
-                    key={category.id}
-                    selected={selectedCategoryId === category.id}
-                    onPress={() => setSelectedCategoryId(
-                      selectedCategoryId === category.id ? null : category.id
-                    )}
-                    style={styles.filterOptionChip}
-                  >
-                    {category.name}
-                  </Chip>
-                ))}
-              </View>
-              
-              <Text style={styles.filterLabel}>Date Range</Text>
-              <View style={styles.dateFilters}>
-                {[
-                  { label: 'All Time', value: 'all' },
-                  { label: 'This Month', value: 'thisMonth' },
-                  { label: 'Last 30 Days', value: 'last30Days' },
-                  { label: 'Last 3 Months', value: 'last3Months' },
-                  { label: 'Last Year', value: 'lastYear' },
-                ].map(item => (
-                  <Chip
-                    key={item.value}
-                    selected={dateRange === item.value}
-                    onPress={() => setDateRange(item.value)}
-                    style={styles.filterOptionChip}
-                  >
-                    {item.label}
-                  </Chip>
-                ))}
-              </View>
-            </View>
-          </Dialog.ScrollArea>
-          <Dialog.Actions>
-            <Button onPress={() => {
-              setSelectedAccountId(null);
-              setSelectedCategoryId(null);
-              setDateRange('all');
-              dispatch(clearFilters());
-              setIsFilterDialogVisible(false);
-            }}>
-              Clear
-            </Button>
-            <Button onPress={() => {
-              dispatch(updateFilters({
-                accountId: selectedAccountId,
-                categoryId: selectedCategoryId,
-                dateRange
-              }));
-              setIsFilterDialogVisible(false);
-            }}>
-              Apply
-            </Button>
-          </Dialog.Actions>
-        </Dialog>
-      </Portal>
-    </View>
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#f5f5f5',
+  },
   container: {
     flex: 1,
     backgroundColor: '#f5f5f5',
   },
   header: {
-    padding: 16,
     backgroundColor: 'white',
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 8,
     elevation: 2,
   },
   searchBar: {
-    marginBottom: 8,
+    elevation: 0,
+    backgroundColor: '#f5f5f5',
   },
-  filterChips: {
+  filterRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingBottom: 8,
   },
-  filterChip: {
+  filterButton: {
     marginRight: 8,
-    marginBottom: 8,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  listContent: {
+    paddingVertical: 8,
   },
   fab: {
     position: 'absolute',
@@ -370,35 +391,64 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
   },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+  filterDialog: {
+    maxHeight: '70%',
   },
-  dialog: {
-    maxHeight: '80%',
+  dialogContent: {
+    paddingVertical: 8,
   },
-  filterLabel: {
+  filterHeading: {
+    fontSize: 16,
     fontWeight: 'bold',
     marginTop: 16,
     marginBottom: 8,
   },
-  accountFilters: {
+  chipContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    marginHorizontal: -4,
+    marginBottom: 8,
   },
-  categoryFilters: {
+  filterChip: {
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  transactionCard: {
+    backgroundColor: 'white',
+    marginHorizontal: 16,
+    marginVertical: 6,
+    borderRadius: 8,
+    elevation: 2,
+    padding: 16,
+  },
+  transactionRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    alignItems: 'center',
   },
-  dateFilters: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+  transactionContent: {
+    flex: 1,
+    paddingRight: 8,
   },
-  filterOptionChip: {
-    margin: 4,
-    height: Math.min(width * 0.08, 36),
+  payeeText: {
+    fontSize: 16,
+    fontWeight: '500',
+    marginBottom: 2,
+  },
+  categoryText: {
+    fontSize: 14,
+    color: '#757575',
+  },
+  amountContainer: {
+    alignItems: 'flex-end',
+    minWidth: 85,
+  },
+  amountText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  dateText: {
+    fontSize: 13,
+    color: '#757575',
+    marginTop: 4,
   },
 });
 

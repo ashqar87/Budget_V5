@@ -1,85 +1,111 @@
-import React, { useEffect, useState } from 'react';
-import { Provider as PaperProvider, DefaultTheme } from 'react-native-paper';
-import { Provider as StoreProvider } from 'react-redux';
+import React, { useEffect, useRef } from 'react';
+import { Provider } from 'react-redux';
+import { PaperProvider, DefaultTheme } from 'react-native-paper';
 import { NavigationContainer } from '@react-navigation/native';
-import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { ActivityIndicator, View, Text } from 'react-native';
-
-import { store } from './src/store';
-import { DatabaseProvider } from './src/context/DatabaseContext';
+import { LogBox, AppState, Platform, Text, View } from 'react-native';
+import store from './src/store';
 import AppNavigator from './src/navigation/AppNavigator';
-import { setupDatabase } from './src/db/setup';
+import { DatabaseProvider } from './src/context/DatabaseContext';
 
-// Define theme
+// Customize theme
 const theme = {
   ...DefaultTheme,
   colors: {
     ...DefaultTheme.colors,
     primary: '#2196F3',
     accent: '#03A9F4',
-    background: '#F5F5F5',
-    surface: '#FFFFFF',
-    text: '#212121',
-    error: '#D32F2F',
+    error: '#F44336',
     success: '#4CAF50',
   },
+  roundness: 8,
 };
 
-export default function App() {
-  const [isReady, setIsReady] = useState(false);
-  const [error, setError] = useState(null);
+// Ignore specific warnings
+LogBox.ignoreLogs([
+  'ViewPropTypes will be removed',
+  'ColorPropType will be removed',
+]);
 
-  useEffect(() => {
-    async function initializeApp() {
-      try {
-        console.log("Initializing app...");
-        await setupDatabase();
-        console.log("Database setup complete");
-        setIsReady(true);
-      } catch (error) {
-        console.error('Failed to initialize app:', error);
-        setError(error.message);
-        setIsReady(true); // Continue anyway to show error message
-      }
+// Add error boundary component
+class ErrorBoundary extends React.Component {
+  state = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.log('App Error:', error);
+    console.log('Error Info:', errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+          <Text style={{ fontSize: 18, fontWeight: 'bold', marginBottom: 20 }}>
+            Something went wrong
+          </Text>
+          <Text style={{ fontSize: 14, marginBottom: 20, textAlign: 'center' }}>
+            {this.state.error?.toString()}
+          </Text>
+          <Text onPress={() => this.setState({ hasError: false })} 
+                style={{ color: '#2196F3', padding: 10 }}>
+            Try again
+          </Text>
+        </View>
+      );
     }
+    return this.props.children;
+  }
+}
 
-    initializeApp();
+// App component with additional validation
+const App = () => {
+  // Track app state changes
+  const appState = useRef(AppState.currentState);
+  
+  // Validate critical dependencies
+  useEffect(() => {
+    // Ensure Redux is working
+    if (!store || typeof store.getState !== 'function') {
+      console.error('Redux store is not initialized properly');
+    }
+    
+    const subscription = AppState.addEventListener('change', nextAppState => {
+      appState.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
   }, []);
-
-  if (!isReady) {
+  
+  // Ensure store exists before rendering Provider
+  if (!store) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <Text>Loading Budget Wise App...</Text>
-        <ActivityIndicator size="large" color="#2196F3" />
+        <Text>Failed to initialize app. Please restart.</Text>
       </View>
     );
   }
-
-  if (error) {
-    return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
-        <Text style={{ fontSize: 18, fontWeight: 'bold', marginBottom: 10, color: 'red' }}>
-          Error Initializing App
-        </Text>
-        <Text style={{ marginBottom: 20 }}>{error}</Text>
-        <Text>Please check the console for more details.</Text>
-      </View>
-    );
-  }
-
+  
   return (
-    <StoreProvider store={store}>
-      <PaperProvider theme={theme}>
-        <DatabaseProvider>
+    <ErrorBoundary>
+      <Provider store={store}>
+        <PaperProvider theme={theme}>
           <SafeAreaProvider>
-            <NavigationContainer>
-              <StatusBar style="auto" />
-              <AppNavigator />
-            </NavigationContainer>
+            <DatabaseProvider>
+              <NavigationContainer>
+                <AppNavigator />
+              </NavigationContainer>
+            </DatabaseProvider>
           </SafeAreaProvider>
-        </DatabaseProvider>
-      </PaperProvider>
-    </StoreProvider>
+        </PaperProvider>
+      </Provider>
+    </ErrorBoundary>
   );
-}
+};
+
+export default App;

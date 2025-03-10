@@ -1,5 +1,6 @@
 import { createSlice } from '@reduxjs/toolkit';
 import { format } from 'date-fns';
+import { decreaseReadyToAssign, increaseReadyToAssign, syncWithBudgetAssigned } from './accountsSlice';
 
 const initialState = {
   budgets: [],
@@ -135,11 +136,6 @@ const budgetSlice = createSlice({
         );
       }
     },
-    removeBudgetSuccess(state, action) {
-      state.budgets = state.budgets.filter(
-        budget => budget.id !== action.payload
-      );
-    },
   },
 });
 
@@ -154,7 +150,6 @@ export const {
   assignToBudgetSuccess,
   updateBudgetAvailableSuccess,
   rolloverBudgetsSuccess,
-  removeBudgetSuccess,
 } = budgetSlice.actions;
 
 // Thunk to assign to budget and update ready to assign

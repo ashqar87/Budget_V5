@@ -1,20 +1,92 @@
 import { database } from '../db/setup';
-import { addBudgetSuccess, updateBudgetSuccess, fetchBudgetsSuccess } from '../store/slices/budgetSlice';
-import { decreaseReadyToAssign, increaseReadyToAssign, updateReadyToAssign } from '../store/slices/accountsSlice';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { format, subMonths, parseISO } from 'date-fns';
+import { format, subMonths, parseISO, addMonths } from 'date-fns';
 
 /**
- * Create or update a budget for a category in a specific month
- * @param {string} categoryId - The ID of the category
- * @param {string} month - Month in YYYY-MM format
- * @param {number} amount - Amount to assign to the budget
- * @param {function} dispatch - Redux dispatch function
+ * Core function: Calculate ready to assign amount
+ * Ready to assign = Total account balance - Total assigned this month
+ * @param {string} month - Current month in YYYY-MM format
  */
-export const assignToBudget = async (categoryId, month, amount, dispatch) => {
+export const calculateReadyToAssign = async (month) => {
   try {
-    // Get or create the budget entry first (handles rollover automatically)
-    const budget = await getOrCreateCategoryBudget(categoryId, month, dispatch);
+    // 1. Get total account balance
+    const accountsCollection = database.collections.get('accounts');
+    const accounts = await accountsCollection.query().fetch();
+    const totalAccountBalance = accounts.reduce(
+      (sum, account) => sum + account.currentBalance,
+      0
+    );
+    
+    // 2. Get total assigned for current month
+    const budgetsCollection = database.collections.get('category_budgets');
+    const budgets = await budgetsCollection.query().fetch();
+    const currentMonthBudgets = budgets.filter(b => b.month === month);
+    const totalAssigned = currentMonthBudgets.reduce(
+      (sum, budget) => sum + budget.assigned,
+      0
+    );
+    
+    // 3. Ready to assign is the difference (minimum 0)
+    return Math.max(0, totalAccountBalance - totalAssigned);
+  } catch (error) {
+    console.error('Error calculating ready to assign:', error);
+    return 0;
+  }
+};
+
+/**
+ * Core function: Get or create budget for category in month
+ * Handles automatic rollover from previous month
+ */
+export const getOrCreateBudget = async (categoryId, month) => {
+  try {
+    const budgetsCollection = database.collections.get('category_budgets');
+    
+    // Check if budget already exists
+    const existingBudgets = await budgetsCollection.query().fetch();
+    const existingBudget = existingBudgets.find(
+      b => b.category_id === categoryId && b.month === month
+    );
+    
+    if (existingBudget) {
+      return existingBudget;
+    }
+    
+    // Budget doesn't exist - determine starting available from previous month
+    const previousMonth = format(subMonths(parseISO(`${month}-01`), 1), 'yyyy-MM');
+    const previousBudget = existingBudgets.find(
+      b => b.category_id === categoryId && b.month === previousMonth
+    );
+    
+    // Get the previous available amount for rollover
+    const startingAvailable = previousBudget ? previousBudget.available : 0;
+    
+    console.log(`Creating new budget for ${categoryId} in ${month} with rollover amount: ${startingAvailable}`);
+    
+    // Create new budget with rolled over available amount
+    const newBudget = await budgetsCollection.create({
+      category_id: categoryId,
+      month: month,
+      assigned: 0,
+      available: startingAvailable, // Use previous month's available as starting point
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+    
+    return newBudget;
+  } catch (error) {
+    console.error(`Error getting/creating budget:`, error);
+    return null;
+  }
+};
+
+/**
+ * Core function: Assign money to a category
+ * Updates budget and returns the amount to update readyToAssign by
+ */
+export const assignToBudget = async (categoryId, month, amount, dispatch = null) => {
+  try {
+    // Get or create the budget for this category and month
+    const budget = await getOrCreateBudget(categoryId, month);
     
     if (!budget) {
       throw new Error('Failed to get or create budget');
@@ -24,33 +96,67 @@ export const assignToBudget = async (categoryId, month, amount, dispatch) => {
     const previousAmount = budget.assigned;
     const difference = amount - previousAmount;
     
+    console.log(`Assigning budget for ${categoryId} in ${month}: ${previousAmount} -> ${amount} (diff: ${difference})`);
+    console.log(`Updating available: ${budget.available} -> ${budget.available + difference}`);
+    
     // Calculate the new available balance (preserving existing available plus the difference)
     const newAvailable = budget.available + difference;
     
-    // Update database
+    // Important fix: Create a complete object for update rather than using function updater
+    // This ensures the values are correctly set in AsyncStorage
     const budgetsCollection = database.collections.get('category_budgets');
-    await budgetsCollection.update(budget.id, (budgetRecord) => {
-      budgetRecord.assigned = amount;
-      budgetRecord.available = newAvailable;
+    
+    // First perform the update with exact values
+    await budgetsCollection.update(budget.id, {
+      assigned: parseFloat(amount),
+      available: parseFloat(newAvailable),
+      updatedAt: new Date()
     });
     
-    // Update Redux
-    dispatch(updateBudgetSuccess({
-      id: budget.id,
-      changes: {
-        assigned: amount,
-        available: newAvailable
-      }
-    }));
+    // Verify the update was successful - important debugging step
+    const updatedBudget = await budgetsCollection.find(budget.id);
+    console.log(`Verification - Budget saved: assigned=${updatedBudget.assigned}, available=${updatedBudget.available}`);
     
-    // Update readyToAssign based on the difference
-    if (difference > 0) {
-      dispatch(decreaseReadyToAssign(difference));
-    } else if (difference < 0) {
-      dispatch(increaseReadyToAssign(Math.abs(difference)));
+    // Update Redux only after confirming database update succeeded
+    if (dispatch && updatedBudget) {
+      try {
+        // Dispatch action with confirmed values from database, not calculated values
+        dispatch({
+          type: 'budget/updateBudgetSuccess',
+          payload: {
+            id: budget.id,
+            changes: {
+              assigned: updatedBudget.assigned,
+              available: updatedBudget.available
+            }
+          }
+        });
+        
+        // Update readyToAssign based on the actual difference
+        const actualDifference = updatedBudget.assigned - previousAmount;
+        if (actualDifference > 0) {
+          dispatch({
+            type: 'accounts/decreaseReadyToAssign',
+            payload: actualDifference
+          });
+        } else if (actualDifference < 0) {
+          dispatch({
+            type: 'accounts/increaseReadyToAssign',
+            payload: Math.abs(actualDifference)
+          });
+        }
+      } catch (dispatchError) {
+        console.error('Error dispatching Redux actions:', dispatchError);
+      }
     }
     
-    return true;
+    // Return verified values from database, not calculated values
+    return {
+      budgetId: budget.id,
+      assigned: updatedBudget.assigned,
+      available: updatedBudget.available,
+      difference
+    };
   } catch (error) {
     console.error('Error assigning to budget:', error);
     return false;
@@ -58,14 +164,170 @@ export const assignToBudget = async (categoryId, month, amount, dispatch) => {
 };
 
 /**
- * Get all budgets for a specific month
- * @param {string} month - Month in YYYY-MM format
+ * Core function: Record transaction impact on category budget
+ * Called whenever a transaction is created or modified
+ */
+export const updateBudgetFromTransaction = async (transaction, oldTransaction = null) => {
+  // Only affect budgets for expense transactions with a category
+  if (transaction.type !== 'expense' || !transaction.category_id) {
+    return null;
+  }
+  
+  try {
+    const transactionMonth = format(new Date(transaction.date), 'yyyy-MM');
+    const transactionAmount = transaction.amount;
+    
+    // If updating a transaction, calculate the net change in amount
+    let amountDifference = transactionAmount;
+    if (oldTransaction && 
+        oldTransaction.type === 'expense' && 
+        oldTransaction.category_id === transaction.category_id) {
+      amountDifference = transactionAmount - oldTransaction.amount;
+    }
+    
+    // Get or create budget for this category/month
+    const budget = await getOrCreateBudget(transaction.category_id, transactionMonth);
+    if (!budget) {
+      throw new Error('Failed to get or create budget for transaction');
+    }
+    
+    // Update the available amount (negative because expenses reduce available)
+    const newAvailable = budget.available - amountDifference;
+    
+    // Update database
+    const budgetsCollection = database.collections.get('category_budgets');
+    await budgetsCollection.update(budget.id, budgetRecord => {
+      budgetRecord.available = newAvailable;
+      budgetRecord.updatedAt = new Date();
+    });
+    
+    return {
+      budgetId: budget.id,
+      available: newAvailable
+    };
+  } catch (error) {
+    console.error('Error updating budget from transaction:', error);
+    return null;
+  }
+};
+
+/**
+ * Ensure budgets exist for all categories in a month
+ * This creates new budget entries with proper rollovers for any categories without one
+ */
+export const ensureAllCategoryBudgets = async (month) => {
+  try {
+    // Get all categories
+    const categoriesCollection = database.collections.get('categories');
+    const categories = await categoriesCollection.query().fetch();
+    
+    if (!categories || categories.length === 0) {
+      return [];
+    }
+    
+    console.log(`Ensuring budgets for ${month} for ${categories.length} categories`);
+    
+    // Get adjacent months to check for rollovers
+    const currentDate = parseISO(`${month}-01`);
+    const previousMonth = format(subMonths(currentDate, 1), 'yyyy-MM');
+    const nextMonth = format(addMonths(currentDate, 1), 'yyyy-MM');
+    
+    // Get existing budgets for current, previous and next month
+    const budgetsCollection = database.collections.get('category_budgets');
+    const allBudgets = await budgetsCollection.query().fetch();
+    const existingBudgetsForMonth = allBudgets.filter(b => b.month === month);
+    const previousMonthBudgets = allBudgets.filter(b => b.month === previousMonth);
+    const nextMonthBudgets = allBudgets.filter(b => b.month === nextMonth);
+    
+    // Track which categories already have budgets for this month
+    const existingCategoryIds = existingBudgetsForMonth.map(b => b.category_id);
+    
+    // Create budgets for each category that doesn't have one
+    const newBudgets = [];
+    for (const category of categories) {
+      // Skip if this category already has a budget for this month
+      if (existingCategoryIds.includes(category.id)) {
+        continue;
+      }
+      
+      // For previous months:
+      // - Check if we have data in next month that can help us determine what should be here
+      // - This helps when navigating backward from a month with data to a month with no data
+      let startingAvailable = 0;
+      const isCurrentOrFutureMonth = new Date(`${month}-01`) >= new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+      
+      if (isCurrentOrFutureMonth) {
+        // Forward rollover - from previous month
+        const previousBudget = previousMonthBudgets.find(b => b.category_id === category.id);
+        startingAvailable = previousBudget ? previousBudget.available : 0;
+        console.log(`Creating forward budget for ${category.id} in ${month} with rollover: ${startingAvailable}`);
+      } else {
+        // Backward fill - check the next month's budget to see what this month should have had
+        const nextBudget = nextMonthBudgets.find(b => b.category_id === category.id);
+        if (nextBudget) {
+          // If next month has a carried-over amount, that came from this month
+          const carriedOver = nextBudget.available - nextBudget.assigned;
+          if (carriedOver > 0) {
+            startingAvailable = carriedOver;
+            console.log(`Backward filling budget for ${category.id} in ${month} with value: ${startingAvailable}`);
+          }
+        }
+      }
+      
+      // Create new budget with proper rollover or backward fill
+      const newBudget = await budgetsCollection.create({
+        category_id: category.id,
+        month: month,
+        assigned: 0,
+        available: startingAvailable,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      
+      newBudgets.push(newBudget);
+    }
+    
+    // Also check for any existing budgets that might need their available amount fixed
+    for (const budget of existingBudgetsForMonth) {
+      const previousBudget = previousMonthBudgets.find(b => b.category_id === budget.category_id);
+      
+      // If previous budget exists and available is not rolled over properly
+      if (previousBudget && budget.assigned === 0 && budget.available === 0 && previousBudget.available > 0) {
+        console.log(`Fixing rollover for ${budget.category_id}: updating available from 0 to ${previousBudget.available}`);
+        
+        await budgetsCollection.update(budget.id, budgetToUpdate => {
+          budgetToUpdate.available = previousBudget.available;
+          budgetToUpdate.updatedAt = new Date();
+        });
+      }
+    }
+    
+    console.log(`Created ${newBudgets.length} new budgets for ${month}`);
+    return newBudgets;
+  } catch (error) {
+    console.error('Error ensuring all category budgets:', error);
+    return [];
+  }
+};
+
+/**
+ * Get all category budgets for a specific month
+ * Ensures all categories have a budget entry for this month
  */
 export const getBudgetsForMonth = async (month) => {
   try {
+    console.log(`Getting budgets for ${month}`);
+    
+    // Ensure all categories have budgets for this month
+    await ensureAllCategoryBudgets(month);
+    
+    // Now fetch all budgets for this month
     const budgetsCollection = database.collections.get('category_budgets');
     const allBudgets = await budgetsCollection.query().fetch();
-    return allBudgets.filter(budget => budget.month === month);
+    const monthBudgets = allBudgets.filter(budget => budget.month === month);
+    
+    console.log(`Found ${monthBudgets.length} budgets for ${month}`);
+    return monthBudgets;
   } catch (error) {
     console.error('Error fetching budgets for month:', error);
     return [];
@@ -73,404 +335,7 @@ export const getBudgetsForMonth = async (month) => {
 };
 
 /**
- * Get budget for a specific category and month
- * @param {string} categoryId - The ID of the category
- * @param {string} month - Month in YYYY-MM format
- * @returns {Object|null} The budget object or null if not found
- */
-export const getCategoryBudget = async (categoryId, month) => {
-  try {
-    const budgetsCollection = database.collections.get('category_budgets');
-    const allBudgets = await budgetsCollection.query().fetch();
-    return allBudgets.find(
-      budget => budget.category_id === categoryId && budget.month === month
-    ) || null;
-  } catch (error) {
-    console.error('Error fetching category budget:', error);
-    return null;
-  }
-};
-
-/**
- * Get or create budget for a specific category and month, handling rollovers automatically
- * @param {string} categoryId - The ID of the category
- * @param {string} month - Month in YYYY-MM format
- * @returns {Object|null} The budget object
- */
-export const getOrCreateCategoryBudget = async (categoryId, month, dispatch) => {
-  try {
-    const budgetsCollection = database.collections.get('category_budgets');
-    
-    // First try to find existing budget for this category and month
-    // Use direct query rather than getCategoryBudget to avoid race conditions
-    const existingBudgets = await budgetsCollection.query().fetch();
-    const existingBudget = existingBudgets.find(
-      budget => budget.category_id === categoryId && budget.month === month
-    );
-    
-    if (existingBudget) {
-      // Budget already exists, return it
-      return existingBudget;
-    }
-    
-    // Budget doesn't exist, we need to create it with rolled over balance from previous month
-    const previousMonth = format(subMonths(parseISO(`${month}-01`), 1), 'yyyy-MM');
-    
-    // Get previous month's budget directly to avoid race conditions
-    const previousBudget = existingBudgets.find(
-      budget => budget.category_id === categoryId && budget.month === previousMonth
-    );
-    
-    // Start with zero, or carry over available amount from previous month
-    const startingAvailable = previousBudget ? previousBudget.available : 0;
-    
-    // Log clear rollover information for debugging
-    console.log(`Rolling over ${categoryId}: previous available = ${startingAvailable}`);
-    
-    // Create new budget with previous month's available balance
-    const newBudget = await budgetsCollection.create({
-      category_id: categoryId,
-      month: month,
-      assigned: 0, // Start with 0 assigned in new month
-      available: startingAvailable // Carry over available amount
-    });
-    
-    console.log(`Created new budget for category ${categoryId} in ${month} with available: ${startingAvailable}`);
-    
-    // Update Redux store
-    if (dispatch) {
-      dispatch(addBudgetSuccess(newBudget));
-    }
-    
-    return newBudget;
-  } catch (error) {
-    console.error(`Error getting/creating budget for category ${categoryId} in ${month}:`, error);
-    return null;
-  }
-};
-
-/**
- * Auto-rollover function to handle all categories when viewing a new month
- * This runs automatically when changing months
- */
-export const autoRolloverBudgets = async (month, dispatch) => {
-  try {
-    console.log(`Auto-checking budgets for ${month}...`);
-    
-    // Get all categories
-    const categoriesCollection = database.collections.get('categories');
-    const allCategories = await categoriesCollection.query().fetch();
-    
-    if (!allCategories || allCategories.length === 0) {
-      console.log('No categories found to rollover');
-      return false;
-    }
-    
-    // Get previous month to check for rollover amounts
-    const previousMonth = format(subMonths(parseISO(`${month}-01`), 1), 'yyyy-MM');
-    
-    // Get existing budgets for both the new month and previous month
-    const budgetsCollection = database.collections.get('category_budgets');
-    const existingBudgets = await budgetsCollection.query().fetch();
-    const existingBudgetsForMonth = existingBudgets.filter(b => b.month === month);
-    const previousMonthBudgets = existingBudgets.filter(b => b.month === previousMonth);
-    
-    const existingCategoryIds = existingBudgetsForMonth.map(b => b.category_id);
-    
-    console.log(`Found ${existingBudgetsForMonth.length} existing budgets for ${month}`);
-    console.log(`Processing ${allCategories.length} total categories`);
-
-    // Fix inconsistent budgets where available amount is not properly set
-    await repairBrokenBudgets(existingBudgetsForMonth, budgetsCollection);
-
-    // Deep copy of existing budgets to track what needs to be fixed
-    const budgetsToFix = [...existingBudgetsForMonth];
-    
-    // Track the created budgets for updating Redux state
-    const newBudgets = [];
-    const updatedBudgets = [];
-    
-    // Step 1: For each category without a budget for this month, create one
-    for (const category of allCategories) {
-      // Skip if this category already has a budget for this month
-      if (existingCategoryIds.includes(category.id)) {
-        console.log(`Checking rollover for ${category.id} - already has budget for ${month}`);
-        
-        // Find the existing budget for current month and previous month
-        const currentBudget = existingBudgetsForMonth.find(b => b.category_id === category.id);
-        const prevBudget = previousMonthBudgets.find(b => b.category_id === category.id);
-        
-        // Only update if previous budget exists and current budget doesn't match expected
-        if (currentBudget) {
-          const expectedAvailable = prevBudget ? prevBudget.available : 0;
-          
-          // If current available is 0 but should have a rolled over value
-          if (currentBudget.available === 0 && expectedAvailable !== 0) {
-            console.log(`Fixing rollover for ${category.id}: updating available from ${currentBudget.available} to ${expectedAvailable}`);
-            
-            try {
-              // Update the budget with the correct rollover amount
-              await budgetsCollection.update(currentBudget.id, budget => {
-                budget.available = expectedAvailable;
-                // Force update timestamp
-                budget.updatedAt = new Date();
-              });
-              
-              console.log(`Database update completed for budget ${currentBudget.id}`);
-              
-              // Get the updated record to confirm changes
-              const verifyBudget = await budgetsCollection.find(currentBudget.id);
-              console.log(`Verified budget available amount: ${verifyBudget ? verifyBudget.available : 'Not found'}`);
-              
-              // Update our tracking array
-              const budgetIndex = budgetsToFix.findIndex(b => b.id === currentBudget.id);
-              if (budgetIndex >= 0) {
-                budgetsToFix[budgetIndex] = {
-                  ...budgetsToFix[budgetIndex],
-                  available: expectedAvailable
-                };
-              }
-              
-              // Track the updated budget for Redux
-              updatedBudgets.push({
-                id: currentBudget.id,
-                changes: { 
-                  available: expectedAvailable,
-                  updatedAt: new Date().toISOString()
-                }
-              });
-            } catch (updateError) {
-              console.error(`Failed to update budget ${currentBudget.id}:`, updateError);
-            }
-          }
-        }
-        
-        continue;
-      }
-      
-      try {
-        console.log(`Processing rollover for category ${category.id} in ${month}`);
-        
-        // Get previous month's budget
-        const previousBudget = previousMonthBudgets.find(
-          budget => budget.category_id === category.id
-        );
-        
-        // Start with zero, or carry over available amount from previous month
-        const startingAvailable = previousBudget ? previousBudget.available : 0;
-        
-        // Create new budget entry
-        const newBudget = await budgetsCollection.create({
-          category_id: category.id,
-          month: month,
-          assigned: 0, // Start with 0 assigned in new month
-          available: startingAvailable // Carry over available amount
-        });
-        
-        newBudgets.push(newBudget);
-        budgetsToFix.push(newBudget);
-        console.log(`Created budget for ${category.id} with available: ${startingAvailable}`);
-        
-      } catch (innerError) {
-        console.error(`Error processing category ${category.id}:`, innerError);
-        // Continue with other categories
-      }
-    }
-    
-    // Update Redux state with all new and updated budgets
-    if (newBudgets.length > 0 && dispatch) {
-      newBudgets.forEach(budget => {
-        dispatch(addBudgetSuccess(budget));
-      });
-    }
-    
-    if (updatedBudgets.length > 0 && dispatch) {
-      updatedBudgets.forEach(update => {
-        dispatch(updateBudgetSuccess(update));
-      });
-    }
-    
-    // Finally, dispatch all budgets to ensure UI is in sync
-    if (dispatch) {
-      dispatch(fetchBudgetsSuccess(budgetsToFix));
-    }
-    
-    console.log(`Successfully rolled over ${newBudgets.length} budgets and fixed ${updatedBudgets.length} existing budgets for ${month}`);
-    return true;
-  } catch (error) {
-    console.error('Error in auto rollover:', error);
-    return false;
-  }
-};
-
-/**
- * Repair broken budgets where available amount is not in sync with assigned amount
- * This addresses data corruption where assigned amounts exist but available amounts are 0
- * @param {Array} budgets - Array of budget objects to check and repair
- * @param {Object} budgetsCollection - Database collection for budgets
- */
-export const repairBrokenBudgets = async (budgets, budgetsCollection) => {
-  console.log('Checking for budgets that need repair...');
-  
-  const budgetsToRepair = budgets.filter(budget => 
-    budget.assigned > 0 && budget.available === 0
-  );
-  
-  if (budgetsToRepair.length === 0) {
-    console.log('No budgets need repair');
-    return;
-  }
-  
-  console.log(`Found ${budgetsToRepair.length} budgets that need repair`);
-  
-  for (const budget of budgetsToRepair) {
-    try {
-      console.log(`Repairing budget for category ${budget.category_id}: setting available to match assigned (${budget.assigned})`);
-      
-      // Fix the budget by setting available to at least match assigned
-      await budgetsCollection.update(budget.id, budgetToUpdate => {
-        budgetToUpdate.available = budget.assigned;
-        budgetToUpdate.updatedAt = new Date();
-      });
-      
-      // Verify the update
-      const verifiedBudget = await budgetsCollection.find(budget.id);
-      console.log(`Verified repair: available now ${verifiedBudget.available}`);
-      
-    } catch (error) {
-      console.error(`Error repairing budget ${budget.id}:`, error);
-    }
-  }
-  
-  console.log('Budget repair process completed');
-};
-
-/**
- * Reset and repair all budgets for a month
- * Recovery function to fix corrupted budget data
- * @param {string} month - Month in YYYY-MM format
- * @param {function} dispatch - Redux dispatch function
- */
-export const resetAndRepairBudgetsForMonth = async (month, dispatch) => {
-  try {
-    console.log(`Repairing all budgets for ${month}...`);
-    
-    // Get all budgets for the month
-    const budgetsCollection = database.collections.get('category_budgets');
-    const existingBudgets = await budgetsCollection.query().fetch();
-    const monthBudgets = existingBudgets.filter(b => b.month === month);
-    
-    // Track updates for Redux
-    const updatedBudgets = [];
-    
-    // Fix each budget
-    for (const budget of monthBudgets) {
-      try {
-        if (budget.available !== budget.assigned) {
-          console.log(`Fixing budget ${budget.id}: setting available to match assigned (${budget.assigned})`);
-          
-          await budgetsCollection.update(budget.id, b => {
-            b.available = budget.assigned;
-            b.updatedAt = new Date();
-          });
-          
-          // Track for Redux update
-          updatedBudgets.push({
-            id: budget.id,
-            changes: {
-              available: budget.assigned,
-              updatedAt: new Date().toISOString()
-            }
-          });
-        }
-      } catch (error) {
-        console.error(`Error fixing budget ${budget.id}:`, error);
-      }
-    }
-    
-    // Update Redux state
-    if (updatedBudgets.length > 0 && dispatch) {
-      updatedBudgets.forEach(update => {
-        dispatch(updateBudgetSuccess(update));
-      });
-    }
-    
-    // Get the updated budgets to return to Redux
-    const updatedMonthBudgets = await budgetsCollection.query().fetch();
-    const fixedBudgets = updatedMonthBudgets.filter(b => b.month === month);
-    
-    if (dispatch) {
-      dispatch(fetchBudgetsSuccess(fixedBudgets));
-    }
-    
-    console.log(`Repaired ${updatedBudgets.length} budgets for ${month}`);
-    return fixedBudgets;
-    
-  } catch (error) {
-    console.error('Error in budget repair:', error);
-    return [];
-  }
-};
-
-/**
- * Calculate total assigned budget amounts across all categories for a month
- * @param {string} month - Month in YYYY-MM format
- * @returns {number} Total amount assigned to budgets for the month
- */
-export const calculateTotalAssignedForMonth = async (month) => {
-  try {
-    const budgets = await getBudgetsForMonth(month);
-    return budgets.reduce((total, budget) => total + budget.assigned, 0);
-  } catch (error) {
-    console.error('Error calculating total assigned:', error);
-    return 0;
-  }
-};
-
-/**
- * Sync the accounts readyToAssign value with budget data
- * @param {function} dispatch - Redux dispatch function
- * @returns {number|null} The calculated readyToAssign value or null on error
- */
-export const syncReadyToAssignWithBudgets = async (dispatch) => {
-  try {
-    const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
-    const totalAssigned = await calculateTotalAssignedForMonth(currentMonth);
-    
-    // Get total account balance
-    const accountsCollection = database.collections.get('accounts');
-    const accounts = await accountsCollection.query().fetch();
-    const totalBalance = accounts.reduce(
-      (sum, account) => sum + account.currentBalance,
-      0
-    );
-    
-    // Calculate readyToAssign as totalBalance minus totalAssigned
-    const readyToAssign = Math.max(0, totalBalance - totalAssigned);
-    
-    // Update Redux store
-    dispatch(updateReadyToAssign(readyToAssign));
-    
-    return readyToAssign;
-  } catch (error) {
-    console.error('Error syncing ready to assign:', error);
-    return null;
-  }
-};
-
-/**
- * Create budgets for a new month based on previous month's available amounts
- * Fixed implementation for proper rollover
- * @param {string} previousMonth - Previous month in YYYY-MM format
- * @param {string} newMonth - New month to create budgets for in YYYY-MM format
- * @param {function} dispatch - Redux dispatch function
- * @returns {boolean} True if successful, false otherwise
- */
-export const rolloverBudgetsToNewMonth = autoRolloverBudgets;
-
-/**
  * Debug utility function to examine all budgets
- * Call this from BudgetScreen loadData function
  */
 export const debugBudgets = async (month) => {
   try {
@@ -480,15 +345,13 @@ export const debugBudgets = async (month) => {
     const categories = await categoriesCollection.query().fetch();
     
     // Get budgets for month
-    const budgetsCollection = database.collections.get('category_budgets');
-    const budgets = await budgetsCollection.query().fetch();
-    const monthBudgets = budgets.filter(b => b.month === month);
+    const budgets = await getBudgetsForMonth(month);
     
-    console.log(`Found ${categories.length} categories and ${monthBudgets.length} budgets for ${month}`);
+    console.log(`Found ${categories.length} categories and ${budgets.length} budgets for ${month}`);
     
     // For each category, find its budget
     for (const category of categories) {
-      const budget = monthBudgets.find(b => b.category_id === category.id);
+      const budget = budgets.find(b => b.category_id === category.id);
       if (budget) {
         console.log(`Category: ${category.name} (${category.id})`);
         console.log(`  Assigned: ${budget.assigned}, Available: ${budget.available}`);
@@ -500,5 +363,29 @@ export const debugBudgets = async (month) => {
     console.log('==============================');
   } catch (error) {
     console.error('Error in debugBudgets:', error);
+  }
+};
+
+/**
+ * Sync the readyToAssign value in Redux based on current data
+ * @param {function} dispatch - Redux dispatch function
+ */
+export const syncReadyToAssignWithBudgets = async (dispatch) => {
+  try {
+    // Get current month
+    const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+    
+    // Calculate ready to assign amount
+    const readyToAssign = await calculateReadyToAssign(currentMonth);
+    
+    // Update the Redux store
+    if (dispatch) {
+      dispatch({ type: 'accounts/updateReadyToAssign', payload: readyToAssign });
+    }
+    
+    return readyToAssign;
+  } catch (error) {
+    console.error('Error syncing ready to assign with budgets:', error);
+    return 0;
   }
 };

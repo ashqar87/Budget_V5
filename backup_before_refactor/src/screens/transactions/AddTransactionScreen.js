@@ -9,10 +9,7 @@ import { updateBudgetAvailableSuccess } from '../../store/slices/budgetSlice';
 import { useDatabase } from '../../context/DatabaseContext';
 import { format } from 'date-fns';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { Q } from '../../db/query';
-// Fix: Import the correct function from budgetUtils
-import { updateBudgetFromTransaction, getOrCreateBudget } from '../../utils/budgetUtils';
-import { updateBudgetSuccess } from '../../store/slices/budgetSlice';
+import { Q } from '../../db/query'; // Add this import
 
 const AddTransactionScreen = () => {
   const route = useRoute();
@@ -55,21 +52,6 @@ const AddTransactionScreen = () => {
       }
     }
   }, [accountId, accounts]);
-
-  // Add debugging for accounts
-  useEffect(() => {
-    if (accounts && accounts.length > 0) {
-      console.log(`Available accounts: ${accounts.length}`);
-      console.log('Account IDs:', accounts.map(a => a.id).join(', '));
-      
-      // Automatically select the first account if one isn't already selected
-      if (!selectedAccount && (!accountId || !accounts.find(a => a.id === accountId))) {
-        setSelectedAccount(accounts[0]);
-      }
-    } else {
-      console.warn('No accounts available in AddTransactionScreen');
-    }
-  }, [accounts, accountId, selectedAccount]);
 
   const handleAmountChange = (text) => {
     // Allow only numbers and decimal point
@@ -140,6 +122,10 @@ const AddTransactionScreen = () => {
       await database.action(async () => {
         const accountsCollection = database.collections.get('accounts');
         const transactionsCollection = database.collections.get('transactions');
+        const budgetsCollection = database.collections.get('category_budgets');
+        
+        // Get current month for budget updates
+        const currentMonth = format(new Date(), 'yyyy-MM');
         
         // First, get the source account
         const accountRecord = await accountsCollection.find(selectedAccount.id);
@@ -226,8 +212,8 @@ const AddTransactionScreen = () => {
             // Get current month in YYYY-MM format
             const currentMonth = format(date, 'yyyy-MM');
             
-            // Fix: Use the correct function name getOrCreateBudget instead of getOrCreateCategoryBudget
-            const budget = await getOrCreateBudget(selectedCategory.id, currentMonth);
+            // Get or create budget for this category and month (handles rollover automatically)
+            const budget = await getOrCreateCategoryBudget(selectedCategory.id, currentMonth, dispatch);
             
             if (budget) {
               console.log(`Updating budget for ${selectedCategory.id} in ${currentMonth}: reducing available by ${parsedAmount}`);
@@ -301,19 +287,8 @@ const AddTransactionScreen = () => {
   };
 
   const renderAccountSelection = () => (
-    <TouchableOpacity 
-      onPress={() => {
-        if (accounts.length === 0) {
-          // Handle no accounts case
-          Alert.alert('No Accounts', 'Please create an account first.');
-          navigation.navigate('AddAccount');
-        } else {
-          setShowAccountDialog(true);
-        }
-      }}
-      style={styles.pickerButton}
-    >
-      <View>
+    <TouchableOpacity onPress={() => setShowAccountDialog(true)}>
+      <View style={styles.pickerButton}>
         <Text style={styles.label}>From Account</Text>
         <List.Item
           title={selectedAccount ? selectedAccount.name : 'Select Account'}
@@ -454,36 +429,27 @@ const AddTransactionScreen = () => {
         </Button>
       </View>
       
-      {/* Account Selection Dialog - Improved */}
+      {/* Account Selection Dialog */}
       <Portal>
         <Dialog visible={showAccountDialog} onDismiss={() => setShowAccountDialog(false)}>
           <Dialog.Title>Select Account</Dialog.Title>
           <Dialog.Content>
-            {accounts.length > 0 ? (
-              <RadioButton.Group
-                onValueChange={(value) => {
-                  console.log("Selected account ID:", value);
-                  const account = accounts.find(acc => acc.id === value);
-                  if (account) {
-                    setSelectedAccount(account);
-                    setShowAccountDialog(false);
-                  } else {
-                    console.error("Couldn't find account with ID:", value);
-                  }
-                }}
-                value={selectedAccount ? selectedAccount.id : ''}
-              >
-                {accounts.map(account => (
-                  <RadioButton.Item
-                    key={account.id}
-                    label={`${account.name} ($${account.currentBalance.toFixed(2)})`}
-                    value={account.id}
-                  />
-                ))}
-              </RadioButton.Group>
-            ) : (
-              <Text>No accounts available. Please create an account first.</Text>
-            )}
+            <RadioButton.Group
+              onValueChange={(value) => {
+                const account = accounts.find(acc => acc.id === value);
+                setSelectedAccount(account);
+                setShowAccountDialog(false);
+              }}
+              value={selectedAccount ? selectedAccount.id : ''}
+            >
+              {accounts.map(account => (
+                <RadioButton.Item
+                  key={account.id}
+                  label={`${account.name} ($${account.currentBalance.toFixed(2)})`}
+                  value={account.id}
+                />
+              ))}
+            </RadioButton.Group>
           </Dialog.Content>
           <Dialog.Actions>
             <Button onPress={() => setShowAccountDialog(false)}>Cancel</Button>

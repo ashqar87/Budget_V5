@@ -1,23 +1,21 @@
 import { createSlice } from '@reduxjs/toolkit';
 
-// Function to ensure date objects are serialized
-const serializeTransaction = (transaction) => {
-  if (!transaction) return transaction;
+// Helper function to ensure dates are serialized
+const serializeDate = (obj) => {
+  if (!obj) return obj;
   
-  const serialized = { ...transaction };
+  // Create a shallow copy to avoid mutating the original object
+  const result = {...obj};
   
-  // Convert any Date objects to ISO strings
-  if (serialized.date instanceof Date) {
-    serialized.date = serialized.date.toISOString();
+  // Convert Date objects to strings
+  if (result.createdAt instanceof Date) {
+    result.createdAt = result.createdAt.toISOString();
   }
-  if (serialized.createdAt instanceof Date) {
-    serialized.createdAt = serialized.createdAt.toISOString();
-  }
-  if (serialized.updatedAt instanceof Date) {
-    serialized.updatedAt = serialized.updatedAt.toISOString();
+  if (result.updatedAt instanceof Date) {
+    result.updatedAt = result.updatedAt.toISOString();
   }
   
-  return serialized;
+  return result;
 };
 
 const initialState = {
@@ -37,7 +35,7 @@ const transactionsSlice = createSlice({
     fetchTransactionsSuccess(state, action) {
       state.status = 'succeeded';
       // Ensure all transaction dates are serialized
-      state.transactions = action.payload.map(serializeTransaction);
+      state.transactions = action.payload.map(serializeDate);
       state.error = null;
     },
     fetchTransactionsFailure(state, action) {
@@ -65,14 +63,14 @@ const transactionsSlice = createSlice({
     },
     addTransactionSuccess(state, action) {
       // Ensure the transaction is serialized
-      state.transactions.unshift(serializeTransaction(action.payload));
+      state.transactions.unshift(serializeDate(action.payload));
     },
     updateTransactionSuccess(state, action) {
       const { id, changes } = action.payload;
       const index = state.transactions.findIndex(transaction => transaction.id === id);
       if (index !== -1) {
         // Ensure date fields are serialized in changes
-        const serializedChanges = serializeTransaction(changes);
+        const serializedChanges = serializeDate(changes);
         state.transactions[index] = { ...state.transactions[index], ...serializedChanges };
       }
     },
